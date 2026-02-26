@@ -185,7 +185,8 @@ class GEDashboard(App):
 
         state = self._active_state
         rate = state.stats.rate()
-        rate_label.update(f"{rate:.1f} pkt/s | {state.total_packets} pkts")
+        zone_tag = f" | Zone {state.current_zone}" if state.current_zone else ""
+        rate_label.update(f"{rate:.1f} pkt/s | {state.total_packets} pkts{zone_tag}")
 
     # ---- Sniffer (live mode) ----
 

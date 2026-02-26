@@ -283,6 +283,9 @@ class SessionPanel(Vertical):
             n_mine = sum(1 for d in state.item_drops if state.is_mine(d.owner_name))
             n_chars = len(state.characters)
 
+        zone_str = str(state.current_zone) if state.current_zone else "-"
+        n_transitions = len(state.zone_transitions)
+
         lines = [
             f"GE_Phantom Dashboard",
             f"{'=' * 40}",
@@ -290,6 +293,7 @@ class SessionPanel(Vertical):
             f"Session Duration:  {_fmt_elapsed(elapsed)}",
             f"Packet Rate:       {rate:.1f} pkt/s",
             f"Total Packets:     {state.total_packets}",
+            f"Current Zone:      {zone_str}" + (f"  ({n_transitions} transitions)" if n_transitions else ""),
             f"",
             f"Entities Tracked:  {n_entities}",
             f"Characters:        {n_chars}",

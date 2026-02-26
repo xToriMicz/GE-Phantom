@@ -35,6 +35,9 @@ class PacketDef:
     size: int | None = None  # Expected size in bytes (None = variable)
     fields: list[FieldDef] = field(default_factory=list)
     confirmed: bool = False  # True once verified from multiple captures
+    # Length field info for variable-size packets with embedded length
+    length_field_offset: int | None = None  # offset of length u16 in packet
+    length_field_includes_header: bool = True  # length value includes header bytes
 
 
 @dataclass
@@ -77,7 +80,7 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x560c,
         name="ENTITY_POSITION",
         direction=Direction.S2C,
-        size=None,  # 26b base, also seen 52, 149, 346
+        size=26,  # confirmed fixed — 52/346 were TCP-coalesced multi-packet segments
         description="Entity (monster/NPC) position update",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
@@ -115,7 +118,7 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x540c,
         name="COMBAT_UPDATE",
         direction=Direction.S2C,
-        size=None,  # 38b base, also seen 63, 64, 76, 116
+        size=38,  # confirmed fixed — 76=2x38, 63=38+25(EFFECT), 64=38+26(ENTITY_POS)
         description="Combat update — contains attack range as float32",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
@@ -128,7 +131,7 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x3e0c,
         name="MONSTER_SPAWN",
         direction=Direction.S2C,
-        size=None,  # 371b typical, also 396, 738, 742
+        size=371,  # confirmed fixed — 742=2x371 coalesced
         description="Monster spawn with full data (type, level, position, stats)",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
@@ -152,7 +155,7 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x400c,
         name="OBJECT_SPAWN",
         direction=Direction.S2C,
-        size=None,  # 371 or 742
+        size=371,  # confirmed — 742=2x371 coalesced
         description="Object/structure spawn (similar to monster spawn)",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
@@ -164,7 +167,7 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x7a0c,
         name="ENTITY_DESPAWN",
         direction=Direction.S2C,
-        size=None,  # 6, 32, or 58 bytes
+        size=6,  # confirmed fixed — 32=6+26(ENTITY_POS) coalesced
         description="Entity despawn or death",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
@@ -189,16 +192,18 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x660c,
         name="BATCH_ENTITY_UPDATE",
         direction=Direction.S2C,
-        size=None,  # 123, 160, 175, 186, 217
+        size=None,  # variable: 123, 160, etc.
         description="Multi-entity position batch update",
         confirmed=True,
+        length_field_offset=2,
+        length_field_includes_header=True,
     ),
 
     0x5d0c: PacketDef(
         opcode=0x5d0c,
         name="PLAYER_POSITION",
         direction=Direction.S2C,
-        size=None,  # 46/69/192/195 — may batch multiple entries
+        size=None,  # variable: 46/69/192/195 — may batch multiple entries
         description="Player character positions using f64 coordinates",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Player entity ID"),
@@ -212,7 +217,7 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x430c,
         name="ENTITY_EVENT",
         direction=Direction.S2C,
-        size=None,  # 7b base, also 14, 33, 39, 59, 378
+        size=7,  # confirmed fixed — 14=2x7, 378=7+371(MONSTER_SPAWN) coalesced
         description="Entity event trigger (animation, state change)",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
@@ -225,7 +230,7 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0xa50c,
         name="COMBAT_DATA",
         direction=Direction.S2C,
-        size=None,  # 23, 71, 94, 97, 112, 120, 132, 283, 287, 535
+        size=None,  # variable: 23, 71, 94, etc. — framing unknown
         description="Combat data — appears during fights, details unknown",
         confirmed=False,
     ),
@@ -234,17 +239,28 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x4a0e,
         name="EFFECT",
         direction=Direction.S2C,
-        size=None,  # 25, 50, 368-496
+        size=None,  # variable: 23, 25 — has length field
         description="Effects/animations — contains readable ASCII strings",
         confirmed=True,
+        length_field_offset=2,
+        length_field_includes_header=True,
     ),
 
     0x4b0c: PacketDef(
         opcode=0x4b0c,
         name="ITEM_EVENT",
         direction=Direction.S2C,
-        size=None,  # 6 or 84 bytes
+        size=None,  # variable: 6 or 84 — framing unknown
         description="Item-related event (pickup confirmation?)",
+        confirmed=False,
+    ),
+
+    0x330e: PacketDef(
+        opcode=0x330e,
+        name="EFFECT_DATA",
+        direction=Direction.S2C,
+        size=None,  # variable: 357, 370, 371, 395 — follows EFFECT packets
+        description="Effect data payload — often follows EFFECT (0x4a0e)",
         confirmed=False,
     ),
 
@@ -329,3 +345,38 @@ def decode_packet(data: bytes) -> dict | None:
 def register_packet(pdef: PacketDef) -> None:
     """Register a newly discovered packet type."""
     KNOWN_PACKETS[pdef.opcode] = pdef
+
+
+def get_packet_size(data: bytes) -> int | None:
+    """Determine the size of a game packet from its header bytes.
+
+    Returns the total packet size (including header), or None if unknown.
+    Requires at least 4 bytes in `data` (HEADER_SIZE).
+    """
+    if len(data) < HEADER_SIZE:
+        return None
+
+    opcode = int.from_bytes(data[:2], "big")
+    pdef = KNOWN_PACKETS.get(opcode)
+    if pdef is None:
+        return None
+
+    # Fixed-size packet
+    if pdef.size is not None:
+        return pdef.size
+
+    # Variable-size with embedded length field
+    if pdef.length_field_offset is not None:
+        lf_end = pdef.length_field_offset + 2  # u16le length field
+        if len(data) < lf_end:
+            return None  # need more data to read length
+        length = int.from_bytes(
+            data[pdef.length_field_offset:lf_end], "little"
+        )
+        if pdef.length_field_includes_header:
+            return length
+        else:
+            return length + HEADER_SIZE
+
+    # Unknown framing
+    return None

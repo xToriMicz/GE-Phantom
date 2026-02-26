@@ -3,15 +3,17 @@ TCP Stream Reassembler — reconstruct application-level packets from TCP segmen
 
 TCP can split or merge game packets across segments. This module:
 1. Buffers incoming TCP data per direction
-2. Splits into game-level packets once we know the framing (length prefix)
+2. Splits into game-level packets using the configured framing strategy
 3. Emits complete game packets
 
-Until we discover the framing format, this just accumulates raw data.
+Framing strategies:
+- None: pass through raw TCP segments as-is (no reassembly)
+- "length_prefix": uniform length-prefix framing (all packets same format)
+- "opcode_registry": per-opcode framing using KNOWN_PACKETS definitions
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -24,6 +26,7 @@ class StreamBuffer:
     direction: str
     buffer: bytearray = field(default_factory=bytearray)
     packet_count: int = 0
+    game_packets_emitted: int = 0
 
     def append(self, data: bytes) -> None:
         self.buffer.extend(data)
@@ -49,9 +52,8 @@ class TCPStreamReassembler:
 
     Framing strategies (set via set_framing):
     - None: pass through raw TCP segments as-is
-    - "length_prefix_le16": first 2 bytes = u16 little-endian payload length
-    - "length_prefix_be16": first 2 bytes = u16 big-endian payload length
-    - "length_at_offset": length field at custom offset/size
+    - "length_prefix": length field at custom offset/size
+    - "opcode_registry": use packet_types.get_packet_size() per opcode
     """
 
     def __init__(self):
@@ -103,9 +105,12 @@ class TCPStreamReassembler:
                 self._emit(stream.direction, data)
             return
 
+        if self._framing == "opcode_registry":
+            self._extract_opcode_registry(stream)
+            return
+
         # Length-prefix framing
         while stream.size >= self._header_size:
-            # Read length field
             header = stream.peek(self._header_size)
             raw_len = header[self._length_offset:self._length_offset + self._length_size]
             pkt_len = int.from_bytes(raw_len, self._length_endian)
@@ -126,7 +131,67 @@ class TCPStreamReassembler:
             data = stream.consume(total_len)
             self._emit(stream.direction, data)
 
+    def _extract_opcode_registry(self, stream: StreamBuffer) -> None:
+        """Extract packets using per-opcode size lookup from packet_types registry."""
+        from src.protocol.packet_types import get_packet_size, HEADER_SIZE
+
+        while stream.size >= HEADER_SIZE:
+            # Peek enough to determine packet size
+            header = stream.peek(min(stream.size, HEADER_SIZE))
+            pkt_size = get_packet_size(header)
+
+            if pkt_size is not None:
+                # Known size — wait for full packet or consume
+                if stream.size < pkt_size:
+                    break  # Need more data (fragmented)
+                data = stream.consume(pkt_size)
+                self._emit(stream.direction, data)
+                continue
+
+            # Unknown size — need to peek more for length field
+            # Try with more data (some packets have length field past HEADER_SIZE)
+            if stream.size > HEADER_SIZE:
+                peek_data = stream.peek(min(stream.size, 8))
+                pkt_size = get_packet_size(peek_data)
+                if pkt_size is not None:
+                    if stream.size < pkt_size:
+                        break  # Need more data
+                    data = stream.consume(pkt_size)
+                    self._emit(stream.direction, data)
+                    continue
+
+            # Truly unknown: scan forward for next known opcode boundary
+            found = self._scan_for_next_opcode(stream)
+            if found:
+                # Emit everything up to the next opcode as one chunk
+                data = stream.consume(found)
+                self._emit(stream.direction, data)
+            else:
+                # No next opcode found — emit all remaining as one packet
+                data = stream.consume(stream.size)
+                self._emit(stream.direction, data)
+            break
+
+    def _scan_for_next_opcode(self, stream: StreamBuffer) -> int | None:
+        """Scan buffer for the next valid opcode after position 2.
+
+        Returns offset of the next opcode, or None if not found.
+        """
+        from src.protocol.packet_types import KNOWN_PACKETS
+
+        buf = stream.buffer
+        # Start scanning from offset 2 (skip current opcode bytes)
+        for offset in range(2, len(buf) - 1):
+            candidate = int.from_bytes(buf[offset:offset + 2], "big")
+            if candidate in KNOWN_PACKETS:
+                # Verify it's plausible: at least HEADER_SIZE from start
+                if offset >= 4:
+                    return offset
+        return None
+
     def _emit(self, direction: str, data: bytes) -> None:
+        stream = self.streams[direction]
+        stream.game_packets_emitted += 1
         for cb in self.callbacks:
             try:
                 cb(direction, data)
@@ -135,6 +200,10 @@ class TCPStreamReassembler:
 
     def stats(self) -> dict:
         return {
-            d: {"buffered": s.size, "tcp_segments": s.packet_count}
+            d: {
+                "buffered": s.size,
+                "tcp_segments": s.packet_count,
+                "game_packets": s.game_packets_emitted,
+            }
             for d, s in self.streams.items()
         }

@@ -99,6 +99,14 @@ class PacketStats:
 UpdateCallback = Callable[[str, dict], None]
 
 
+@dataclass
+class ZoneTransition:
+    """Records a zone change."""
+    timestamp: float
+    from_zone: int
+    to_zone: int
+
+
 class RadarState:
     """Tracks all game state from decoded packets."""
 
@@ -115,6 +123,9 @@ class RadarState:
         self.stats: PacketStats = PacketStats()
         self._lock = threading.Lock()
         self._callbacks: list[UpdateCallback] = []
+        # Zone tracking
+        self.current_zone: int = 0
+        self.zone_transitions: list[ZoneTransition] = []
 
     def on_update(self, callback: UpdateCallback) -> None:
         """Subscribe to state changes."""
@@ -200,6 +211,18 @@ class RadarState:
                 state_flags=state if state else 0,
                 zone=zone if zone else 0,
             )
+
+        # Track zone transitions
+        if zone is not None and zone > 0 and zone != self.current_zone:
+            old_zone = self.current_zone
+            self.current_zone = zone
+            if old_zone > 0:
+                self.zone_transitions.append(
+                    ZoneTransition(timestamp=ts, from_zone=old_zone, to_zone=zone)
+                )
+                self._notify("zone_change", {
+                    "from_zone": old_zone, "to_zone": zone, "timestamp": ts,
+                })
 
         self._notify("position", d)
 

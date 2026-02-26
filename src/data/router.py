@@ -4,9 +4,13 @@ GE_Phantom — Multiclient Router
 Routes packets from multiple GE clients to separate RadarState instances.
 Each client is identified by its unique local endpoint (ip:port).
 
-Architecture:
+Architecture (with reassembly):
+  GESniffer → ClientRouter → per-client TCPStreamReassembler → per-client RadarState
+                                                              → global RadarState
+
+Without reassembly (legacy):
   GESniffer → ClientRouter → per-client RadarState
-                           → global RadarState (aggregated)
+                            → global RadarState
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from src.sniffer.capture import GEPacket
+from src.sniffer.stream import TCPStreamReassembler
 from src.data.state import RadarState
 
 
@@ -29,6 +34,9 @@ class ClientSession:
     first_seen: float
     last_seen: float = 0.0
     reconnect_count: int = 0  # times this char reconnected on a new port
+    reassembler: TCPStreamReassembler | None = None
+    # Buffer for reassembler output within a single process_packet call
+    _pending: list = field(default_factory=list)
 
     def is_stale(self, timeout: float, now: float | None = None) -> bool:
         """Check if client hasn't been seen within timeout seconds."""
@@ -47,6 +55,7 @@ class ClientRouter:
       - S2C packets: dst_ip:dst_port is the client
 
     Features:
+      - TCP stream reassembly (splits coalesced TCP segments into game packets)
       - Stale pruning: remove clients not seen within a timeout
       - Reconnect detection: same character name on a new port
     """
@@ -54,8 +63,13 @@ class ClientRouter:
     # Default stale timeout: 5 minutes of no packets
     DEFAULT_STALE_TIMEOUT: float = 300.0
 
-    def __init__(self, my_chars: list[str] | None = None):
+    def __init__(
+        self,
+        my_chars: list[str] | None = None,
+        reassemble: bool = True,
+    ):
         self._my_chars = my_chars
+        self._reassemble = reassemble
         self.clients: dict[str, ClientSession] = {}
         self.global_state: RadarState = RadarState(my_chars=my_chars)
         self._next_label: int = 1
@@ -65,7 +79,11 @@ class ClientRouter:
         self._char_to_key: dict[str, str] = {}
 
     def process_packet(self, pkt: GEPacket) -> tuple[str, dict | None]:
-        """Route packet to correct client. Returns (client_key, decoded)."""
+        """Route packet to correct client. Returns (client_key, decoded).
+
+        When reassembly is enabled, a single TCP segment may yield multiple
+        game packets. All are processed into state; the last decoded is returned.
+        """
         key = self._identify(pkt)
 
         with self._lock:
@@ -75,15 +93,48 @@ class ClientRouter:
 
         session.last_seen = pkt.timestamp
 
-        # Feed to per-client state
-        decoded = session.state.process_packet(pkt)
-        # Feed to global state
-        self.global_state.process_packet(pkt)
+        if session.reassembler:
+            return self._process_reassembled(session, key, pkt)
+        else:
+            return self._process_direct(session, key, pkt)
 
-        # Try to upgrade label from decoded data
+    def _process_reassembled(
+        self, session: ClientSession, key: str, pkt: GEPacket,
+    ) -> tuple[str, dict | None]:
+        """Process packet through per-client reassembler."""
+        session._pending.clear()
+        session.reassembler.feed(pkt)
+
+        last_decoded = None
+        for direction, data in session._pending:
+            game_pkt = GEPacket(
+                timestamp=pkt.timestamp,
+                direction=direction,
+                src_ip=pkt.src_ip,
+                dst_ip=pkt.dst_ip,
+                src_port=pkt.src_port,
+                dst_port=pkt.dst_port,
+                payload=data,
+                seq=0,
+                ack=0,
+                flags="",
+            )
+            decoded = session.state.process_packet(game_pkt)
+            self.global_state.process_packet(game_pkt)
+            if decoded:
+                last_decoded = decoded
+                self._maybe_upgrade_label(session, decoded)
+
+        return key, last_decoded
+
+    def _process_direct(
+        self, session: ClientSession, key: str, pkt: GEPacket,
+    ) -> tuple[str, dict | None]:
+        """Process packet directly without reassembly."""
+        decoded = session.state.process_packet(pkt)
+        self.global_state.process_packet(pkt)
         if decoded:
             self._maybe_upgrade_label(session, decoded)
-
         return key, decoded
 
     def _identify(self, pkt: GEPacket) -> str:
@@ -97,16 +148,30 @@ class ClientRouter:
         """Create a new ClientSession. Must be called under _lock."""
         label = f"Client {self._next_label}"
         self._next_label += 1
+
+        reassembler = None
+        if self._reassemble:
+            reassembler = TCPStreamReassembler()
+            reassembler.set_framing("opcode_registry")
+
         session = ClientSession(
             client_key=key,
             label=label,
             state=RadarState(my_chars=self._my_chars),
             first_seen=timestamp,
             last_seen=timestamp,
+            reassembler=reassembler,
         )
+
+        # Wire reassembler callback to accumulate into session._pending
+        if reassembler:
+            reassembler.on_game_packet(
+                lambda d, data: session._pending.append((d, data))
+            )
+
         self.clients[key] = session
 
-        # Notify subscribers (outside lock would be ideal but keeping simple)
+        # Notify subscribers
         for cb in self._callbacks:
             try:
                 cb(session)
@@ -179,7 +244,7 @@ class ClientRouter:
             for key in stale_keys:
                 session = self.clients.pop(key)
                 pruned.append(session)
-                # Clean up char→key mapping
+                # Clean up char->key mapping
                 label_lower = session.label.lower()
                 if self._char_to_key.get(label_lower) == key:
                     del self._char_to_key[label_lower]
