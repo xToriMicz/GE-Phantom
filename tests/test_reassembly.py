@@ -683,47 +683,47 @@ class TestImprovedBoundaryScanner:
         r.on_game_packet(lambda d, data: results.append((d, data)))
         return r, results
 
-    def test_effect_data_followed_by_entity_position(self):
-        """EFFECT_DATA (unknown framing) followed by ENTITY_POSITION.
+    def test_unknown_framing_followed_by_entity_position(self):
+        """NAME_LABEL (unknown framing) followed by ENTITY_POSITION.
 
         The scanner should find EP boundary, not false HEARTBEAT within payload.
         """
         r, results = self._make_reassembler()
-        # Build EFFECT_DATA payload (variable, unknown framing)
-        # Use 313 bytes (observed base size), but don't embed false opcodes
-        ed = bytearray(313)
-        ed[0] = 0x33
-        ed[1] = 0x0e
+        # Build NAME_LABEL payload (variable, unknown framing)
+        # Use 313 bytes, but don't embed false opcodes
+        nl = bytearray(313)
+        nl[0] = 0x66
+        nl[1] = 0x0e
         # Fill with non-opcode bytes to avoid false positives
         for i in range(2, 313):
-            ed[i] = 0x42
+            nl[i] = 0x42
         pos = _make_entity_position(entity_id=99)
-        merged = bytes(ed) + pos
+        merged = bytes(nl) + pos
 
         r.feed(_make_pkt("S2C", merged))
         # Scanner should find ENTITY_POSITION at offset 313
         assert len(results) == 2
-        assert len(results[0][1]) == 313  # EFFECT_DATA
+        assert len(results[0][1]) == 313  # NAME_LABEL
         assert len(results[1][1]) == 26   # ENTITY_POSITION
 
     def test_heartbeat_zeros_in_payload_not_false_boundary(self):
-        """Zeros within EFFECT_DATA payload should not trigger HEARTBEAT boundary."""
+        """Zeros within NAME_LABEL payload should not trigger HEARTBEAT boundary."""
         r, results = self._make_reassembler()
-        # EFFECT_DATA with internal zeros (would be false HEARTBEAT)
-        ed = bytearray(50)
-        ed[0] = 0x33
-        ed[1] = 0x0e
+        # NAME_LABEL (0x660e) with internal zeros (would be false HEARTBEAT)
+        nl = bytearray(50)
+        nl[0] = 0x66
+        nl[1] = 0x0e
         # Put zeros at various offsets (would match HEARTBEAT 0x0000)
-        ed[10:16] = b"\x00\x00\x00\x00\x00\x00"
-        ed[20:26] = b"\x00\x00\x00\x00\x00\x00"
+        nl[10:16] = b"\x00\x00\x00\x00\x00\x00"
+        nl[20:26] = b"\x00\x00\x00\x00\x00\x00"
         # Follow with a reliable opcode
         cu = _make_combat_update(entity_id=1)
-        merged = bytes(ed) + cu
+        merged = bytes(nl) + cu
 
         r.feed(_make_pkt("S2C", merged))
         # Should find COMBAT_UPDATE at offset 50, not false HEARTBEAT earlier
         assert len(results) == 2
-        assert len(results[0][1]) == 50  # EFFECT_DATA (full payload)
+        assert len(results[0][1]) == 50  # NAME_LABEL (full payload)
         assert len(results[1][1]) == 38  # COMBAT_UPDATE
 
 

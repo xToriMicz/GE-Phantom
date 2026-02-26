@@ -126,8 +126,8 @@ def test_get_packet_size_too_short():
 
 def test_get_packet_size_variable_no_length_field():
     """Variable-size packet without length field returns None."""
-    # EFFECT_DATA (0x330e) has no length field
-    assert get_packet_size(b"\x33\x0e\x00\x00") is None
+    # NAME_LABEL (0x660e) has no length field
+    assert get_packet_size(b"\x66\x0e\x00\x00") is None
 
 
 def test_get_packet_size_combat_data_fixed():

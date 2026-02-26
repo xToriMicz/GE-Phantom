@@ -320,6 +320,11 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         direction=Direction.S2C,
         size=22,  # confirmed — gap=22 (31 occurrences), 66=3x22, 88=4x22
         description="Entity stat update (HP/MP/status)",
+        fields=[
+            FieldDef("entity_id", 2, 2, "u16le", "Entity ID"),
+            FieldDef("stat_value", 10, 4, "u32le", "Stat value (HP/damage, 0-16679)"),
+            FieldDef("speed_or_range", 18, 4, "f32", "Speed or range value (6.4-10.5)"),
+        ],
         confirmed=True,
     ),
 
@@ -337,10 +342,22 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         name="ENTITY_DATA",
         direction=Direction.S2C,
         size=270,  # confirmed fixed — 12/17 validated embeddings at offset 270
-        description="Entity detailed data block (270 bytes)",
+        description="Entity detailed data block (270 bytes, mostly zeros — sparse template)",
         fields=[
-            FieldDef("data_id", 2, 4, "u32le", "Data/sequence ID"),
-            FieldDef("entity_ref", 10, 4, "u32le", "Referenced entity ID"),
+            FieldDef("data_id", 2, 4, "u32le", "Data/sequence ID (sequential)"),
+            FieldDef("entity_ref", 10, 2, "u16le", "Referenced entity ID"),
+            FieldDef("flags1", 19, 1, "u8", "Flags byte 1"),
+            FieldDef("slot_a", 32, 1, "u8", "Slot/sub-type A (0 or 1)"),
+            FieldDef("config_a", 37, 1, "u8", "Config byte A (0x80 flag)"),
+            FieldDef("sub_count", 55, 1, "u8", "Sub-entry count (typically 6)"),
+            FieldDef("type_flag", 76, 4, "u32le", "Type/category flag"),
+            FieldDef("stat_a", 89, 4, "u32le", "Stat block A"),
+            FieldDef("stat_b", 124, 1, "u8", "Stat block B (variant)"),
+            FieldDef("config_b", 128, 4, "u32le", "Config block B (sparse)"),
+            FieldDef("slot_b", 162, 1, "u8", "Slot/sub-type B (0 or 4)"),
+            FieldDef("slot_c", 172, 1, "u8", "Slot/sub-type C (0 or 4)"),
+            FieldDef("variant", 219, 1, "u8", "Variant byte (0 or 2)"),
+            FieldDef("level_or_tier", 241, 2, "u16le", "Level/tier value (sparse, 0-992)"),
         ],
         confirmed=True,
     ),
@@ -350,10 +367,17 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         name="COMBAT_EFFECT",
         direction=Direction.S2C,
         size=44,  # confirmed fixed — 31/39 validated embeddings at offset 44
-        description="Combat effect / damage display data",
+        description="Combat effect / damage display — contains source/target coords and damage",
         fields=[
-            FieldDef("effect_id", 2, 4, "u32le", "Effect ID"),
-            FieldDef("entity_id", 4, 4, "u32le", "Target entity ID"),
+            FieldDef("magic", 2, 2, "u16le", "Constant marker (0x545a)"),
+            FieldDef("entity_id", 4, 4, "u32le", "Source entity ID"),
+            FieldDef("x", 12, 4, "i32le", "Source X coordinate"),
+            FieldDef("y", 16, 4, "i32le", "Source Y coordinate"),
+            FieldDef("effect_type", 20, 1, "u8", "Effect sub-type (72=ranged, 119=melee)"),
+            FieldDef("effect_value", 24, 4, "u32le", "Damage/effect magnitude"),
+            FieldDef("target_entity_id", 30, 4, "u32le", "Target entity ID"),
+            FieldDef("target_value", 36, 4, "u32le", "Target effect value"),
+            FieldDef("sequence_id", 40, 4, "u32le", "Sequence counter"),
         ],
         confirmed=True,
     ),
@@ -372,9 +396,23 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         name="ENTITY_MOVE_PATH",
         direction=Direction.S2C,
         size=60,  # confirmed fixed — 7/8 = 60b, 105=60+45(coalesced); validated at offset 60
-        description="Entity movement path with waypoints",
+        description="Entity movement path — 3 waypoints: start, waypoint1, destination",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("start_x", 6, 4, "i32le", "Start X coordinate"),
+            FieldDef("start_y", 10, 4, "i32le", "Start Y coordinate"),
+            FieldDef("start_state", 14, 1, "u8", "Start state (30=idle, 81=walk, 119=run)"),
+            FieldDef("wp1_x", 18, 4, "i32le", "Waypoint 1 X coordinate"),
+            FieldDef("wp1_y", 22, 4, "i32le", "Waypoint 1 Y coordinate"),
+            FieldDef("wp1_state", 26, 1, "u8", "Waypoint 1 state"),
+            FieldDef("path_ref", 30, 2, "u16le", "Path reference/entity tag"),
+            FieldDef("path_magic", 32, 4, "u32le", "Path constant (0x331ff130)"),
+            FieldDef("speed1", 36, 4, "u32le", "Speed/distance value 1"),
+            FieldDef("speed2", 40, 4, "u32le", "Speed/distance value 2"),
+            FieldDef("delta", 44, 4, "u32le", "Time delta or segment length"),
+            FieldDef("dest_x", 48, 4, "i32le", "Destination X coordinate"),
+            FieldDef("dest_y", 52, 4, "i32le", "Destination Y coordinate"),
+            FieldDef("dest_state", 56, 1, "u8", "Destination state"),
         ],
         confirmed=True,
     ),
@@ -393,9 +431,22 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         name="ENTITY_MOVE_DETAIL",
         direction=Direction.S2C,
         size=72,  # confirmed fixed — 4/5 = 72b, 160=72+88(coalesced); validated at offset 72
-        description="Detailed entity movement with coords and state",
+        description="Detailed entity movement — start/waypoint/dest coords + speed + heading",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("start_x", 6, 4, "i32le", "Start X coordinate"),
+            FieldDef("start_y", 10, 4, "i32le", "Start Y coordinate"),
+            FieldDef("start_state", 14, 1, "u8", "Start state (30=idle, 81=walk, 119=run)"),
+            FieldDef("wp1_x", 18, 4, "i32le", "Waypoint 1 X coordinate"),
+            FieldDef("wp1_y", 22, 4, "i32le", "Waypoint 1 Y coordinate"),
+            FieldDef("wp1_state", 26, 1, "u8", "Waypoint 1 state"),
+            FieldDef("distance", 30, 4, "u32le", "Distance or path cost"),
+            FieldDef("chase_entity", 36, 4, "u32le", "Chase/follow entity ID"),
+            FieldDef("speed", 44, 4, "f32", "Movement speed (0.0-7.0)"),
+            FieldDef("heading", 56, 4, "f32", "Heading angle (8.8-10.4)"),
+            FieldDef("dest_x", 60, 4, "i32le", "Destination X coordinate"),
+            FieldDef("dest_y", 64, 4, "i32le", "Destination Y coordinate"),
+            FieldDef("dest_state", 68, 1, "u8", "Destination state"),
         ],
         confirmed=True,
     ),
@@ -469,6 +520,48 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         size=None,  # variable: 44-306b
         description="Character data payload",
         confirmed=False,
+    ),
+
+    # ---- Discovered from unknown opcode analysis (2026-02-26) ----
+
+    0x0064: PacketDef(
+        opcode=0x0064,
+        name="SYSTEM_PING",
+        direction=Direction.S2C,
+        size=8,  # confirmed — 6/6 identical segments, all 8 bytes
+        description="System/server ping — all instances identical payload",
+        fields=[
+            FieldDef("param1", 2, 4, "u32le", "System parameter 1"),
+            FieldDef("param2", 6, 2, "u16le", "System parameter 2"),
+        ],
+        confirmed=True,
+    ),
+
+    0x7b0c: PacketDef(
+        opcode=0x7b0c,
+        name="ENTITY_SPEED",
+        direction=Direction.S2C,
+        size=25,  # confirmed — 3/3 deduced from embedded boundaries
+        description="Entity speed/parameter update — contains f32 speed values",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("speed1", 10, 4, "f32", "Speed value 1 (~7.5-8.0)"),
+            FieldDef("speed2", 18, 4, "f32", "Speed value 2 (same as speed1)"),
+        ],
+        confirmed=True,
+    ),
+
+    0x5411: PacketDef(
+        opcode=0x5411,
+        name="ENTITY_PROFILE",
+        direction=Direction.S2C,
+        size=77,  # confirmed — 3/3 identical size, no boundary variation
+        description="Entity profile/detail data (77 bytes)",
+        fields=[
+            FieldDef("entity_ref", 4, 4, "u32le", "Referenced entity ID"),
+            FieldDef("profile_id", 13, 2, "u16le", "Profile/badge ID"),
+        ],
+        confirmed=True,
     ),
 
     # ---- C2S: Client → Server (encrypted — opcode readable, payload not) ----
