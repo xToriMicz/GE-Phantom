@@ -8,6 +8,10 @@ Modes:
   - Live: runs GESniffer in a worker thread, feeds packets to RadarState
   - Replay: loads a saved session JSON file and replays packets
 
+Multiclient: ClientRouter auto-detects multiple GE clients by local endpoint.
+  0   — global view (all clients combined)
+  1-9 — switch to per-client view
+
 Replay speed controls:
   [ / ] — decrease / increase speed (1x, 2x, 5x, 10x, MAX)
   x     — export session stats to JSON
@@ -28,6 +32,7 @@ from textual.widgets import Footer, Static, TabbedContent, TabPane
 from textual.timer import Timer
 
 from src.data.state import RadarState
+from src.data.router import ClientRouter
 from src.sniffer.capture import GESniffer, GEPacket
 from src.dashboard.widgets import (
     TrafficPanel,
@@ -64,6 +69,17 @@ class GEDashboard(App):
         Binding("left_square_bracket", "speed_down", "Slower"),
         Binding("right_square_bracket", "speed_up", "Faster"),
         Binding("x", "export_stats", "Export"),
+        # Client switching: 0 = global, 1-9 = per-client
+        Binding("0", "switch_client(0)", "Global", show=False),
+        Binding("1", "switch_client(1)", "", show=False),
+        Binding("2", "switch_client(2)", "", show=False),
+        Binding("3", "switch_client(3)", "", show=False),
+        Binding("4", "switch_client(4)", "", show=False),
+        Binding("5", "switch_client(5)", "", show=False),
+        Binding("6", "switch_client(6)", "", show=False),
+        Binding("7", "switch_client(7)", "", show=False),
+        Binding("8", "switch_client(8)", "", show=False),
+        Binding("9", "switch_client(9)", "", show=False),
     ]
 
     def __init__(
@@ -75,13 +91,25 @@ class GEDashboard(App):
         super().__init__()
         self._iface = iface
         self._replay_path = replay_path
-        self.state = RadarState(my_chars=my_chars)
+        self.router = ClientRouter(my_chars=my_chars)
+        # Active client view: None = global, str = client_key
+        self._active_client: str | None = None
         self._paused = False
         self._connected = False
         self._refresh_timer: Timer | None = None
         # Replay speed
         self._speed_index = 0  # index into SPEED_PRESETS
         self._replay_done = False
+
+    @property
+    def _active_state(self) -> RadarState:
+        """Return the RadarState for the current view."""
+        if self._active_client is None:
+            return self.router.global_state
+        session = self.router.clients.get(self._active_client)
+        if session:
+            return session.state
+        return self.router.global_state
 
     @property
     def _speed_label(self) -> str:
@@ -131,10 +159,29 @@ class GEDashboard(App):
             mode = "LIVE" if self._connected else "CONNECTING"
 
         paused = " [PAUSED]" if self._paused else ""
-        status.update(f"GE_Phantom | {mode}{paused}")
 
-        rate = self.state.stats.rate()
-        rate_label.update(f"{rate:.1f} pkt/s | {self.state.total_packets} pkts")
+        # Client info
+        clients = self.router.get_active_clients()
+        n_clients = len(clients)
+
+        if self._active_client is None:
+            view_tag = "Global"
+        else:
+            session = self.router.clients.get(self._active_client)
+            view_tag = session.label if session else "?"
+
+        if n_clients > 1:
+            client_tag = f" [{view_tag}] [{n_clients} clients]"
+        elif n_clients == 1:
+            client_tag = f" [{clients[0].label}]"
+        else:
+            client_tag = ""
+
+        status.update(f"GE_Phantom | {mode}{paused}{client_tag}")
+
+        state = self._active_state
+        rate = state.stats.rate()
+        rate_label.update(f"{rate:.1f} pkt/s | {state.total_packets} pkts")
 
     # ---- Sniffer (live mode) ----
 
@@ -149,7 +196,7 @@ class GEDashboard(App):
     def _on_packet(self, pkt: GEPacket) -> None:
         if self._paused:
             return
-        decoded = self.state.process_packet(pkt)
+        _key, decoded = self.router.process_packet(pkt)
         if decoded:
             # Schedule UI update on the main thread
             self.call_from_thread(self._log_packet, decoded)
@@ -200,7 +247,7 @@ class GEDashboard(App):
                 flags=pkt_data.get("flags", ""),
             )
 
-            decoded = self.state.process_packet(pkt)
+            _key, decoded = self.router.process_packet(pkt)
             if decoded:
                 self.call_from_thread(self._log_packet, decoded)
 
@@ -231,13 +278,15 @@ class GEDashboard(App):
         """Log a packet to the traffic panel (called on main thread)."""
         try:
             panel: TrafficPanel = self.query_one(TrafficPanel)
-            panel.log_packet(decoded, self.state)
+            panel.log_packet(decoded, self._active_state)
         except Exception:
             pass
 
     def _periodic_refresh(self) -> None:
         """Refresh tables and stats periodically."""
         self._update_header()
+
+        state = self._active_state
 
         # Only refresh the active tab's content
         tabs: TabbedContent = self.query_one("#tabs", TabbedContent)
@@ -246,19 +295,19 @@ class GEDashboard(App):
         if active == "entities":
             try:
                 panel: EntityPanel = self.query_one(EntityPanel)
-                panel.refresh_entities(self.state)
+                panel.refresh_entities(state)
             except Exception:
                 pass
         elif active == "drops":
             try:
                 panel: DropPanel = self.query_one(DropPanel)
-                panel.refresh_drops(self.state)
+                panel.refresh_drops(state)
             except Exception:
                 pass
         elif active == "session":
             try:
                 panel: SessionPanel = self.query_one(SessionPanel)
-                panel.refresh_session(self.state)
+                panel.refresh_session(state)
             except Exception:
                 pass
 
@@ -279,6 +328,22 @@ class GEDashboard(App):
             panel.clear_log()
         except Exception:
             pass
+
+    def action_switch_client(self, index: int) -> None:
+        """Switch active client view. 0 = global, 1-9 = per-client."""
+        if index == 0:
+            self._active_client = None
+            self._update_header()
+            self.notify("View: Global (all clients)")
+            return
+
+        session = self.router.get_client_by_index(index)
+        if session:
+            self._active_client = session.client_key
+            self._update_header()
+            self.notify(f"View: {session.label}")
+        else:
+            self.notify(f"No client #{index}")
 
     def action_speed_up(self) -> None:
         """Increase replay speed."""
@@ -310,8 +375,9 @@ class GEDashboard(App):
 
     def _build_export(self) -> dict:
         """Build a session stats dict for export."""
-        elapsed = time.time() - self.state.start_time
-        with self.state._lock:
+        state = self._active_state
+        elapsed = time.time() - state.start_time
+        with state._lock:
             entities = [
                 {
                     "entity_id": e.entity_id,
@@ -320,7 +386,7 @@ class GEDashboard(App):
                     "y": e.y,
                     "name": e.name,
                 }
-                for e in self.state.entities.values()
+                for e in state.entities.values()
             ]
             drops = [
                 {
@@ -333,16 +399,17 @@ class GEDashboard(App):
                     "owner_name": d.owner_name,
                     "picked_up": d.picked_up,
                 }
-                for d in self.state.item_drops
+                for d in state.item_drops
             ]
         return {
             "exported_at": datetime.now().isoformat(),
+            "active_view": self._active_client or "global",
             "session": {
                 "duration_seconds": round(elapsed, 1),
-                "total_packets": self.state.total_packets,
-                "packet_rate": round(self.state.stats.rate(), 1),
+                "total_packets": state.total_packets,
+                "packet_rate": round(state.stats.rate(), 1),
             },
-            "packet_counts": dict(self.state.packet_counts),
+            "packet_counts": dict(state.packet_counts),
             "entities": entities,
             "item_drops": drops,
         }
@@ -351,6 +418,6 @@ class GEDashboard(App):
         """Handle entity row selection from EntityPanel."""
         try:
             panel: EntityPanel = self.query_one(EntityPanel)
-            panel.show_detail(event.entity_id, self.state)
+            panel.show_detail(event.entity_id, self._active_state)
         except Exception:
             pass
