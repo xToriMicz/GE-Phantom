@@ -15,9 +15,9 @@ from typing import Callable
 
 from scapy.all import IP, TCP, sniff, conf
 
-# Default GE server config
-DEFAULT_SERVER_IPS = ["103.55.55.138"]
-DEFAULT_PORTS = [7000, 7001, 7008]
+# Default GE server config — subnet covers .138-.142 observed in live connections
+DEFAULT_SERVER_IPS = ["103.55.55.138", "103.55.55.141", "103.55.55.142"]
+DEFAULT_PORTS = [7000, 7001, 7004, 7006, 7008]
 
 
 @dataclass
