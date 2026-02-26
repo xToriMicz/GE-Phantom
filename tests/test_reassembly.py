@@ -96,6 +96,48 @@ def _make_effect(total_size: int = 25) -> bytes:
     return bytes(buf)
 
 
+def _make_combat_data(entity_id: int = 1, sub_index: int = 0) -> bytes:
+    """Build a 23-byte COMBAT_DATA (0xa50c)."""
+    buf = bytearray(23)
+    buf[0] = 0xa5
+    buf[1] = 0x0c
+    buf[2] = sub_index
+    buf[3] = 0x9a  # constant byte observed in captures
+    struct.pack_into("<I", buf, 4, entity_id)
+    return bytes(buf)
+
+
+def _make_combat_footer() -> bytes:
+    """Build a 25-byte COMBAT_FOOTER (0x000c)."""
+    buf = bytearray(25)
+    buf[0] = 0x00
+    buf[1] = 0x0c
+    buf[2] = 0x19
+    buf[3] = 0x00
+    return bytes(buf)
+
+
+def _make_player_position(entity_id: int = 1, x: float = 100.0, y: float = 200.0) -> bytes:
+    """Build a 23-byte PLAYER_POSITION (0x5d0c) with f64 coordinates."""
+    buf = bytearray(23)
+    buf[0] = 0x5d
+    buf[1] = 0x0c
+    struct.pack_into("<I", buf, 2, entity_id)
+    struct.pack_into("<d", buf, 6, x)
+    struct.pack_into("<d", buf, 14, y)
+    buf[22] = 0  # flags
+    return bytes(buf)
+
+
+def _make_item_event(entity_id: int = 1) -> bytes:
+    """Build a 6-byte ITEM_EVENT (0x4b0c)."""
+    buf = bytearray(6)
+    buf[0] = 0x4b
+    buf[1] = 0x0c
+    struct.pack_into("<I", buf, 2, entity_id)
+    return bytes(buf)
+
+
 # ---- Opcode registry reassembly tests ----
 
 class TestOpcodeRegistryReassembly:
@@ -392,3 +434,356 @@ class TestRouterReassembly:
         # Each game packet is processed separately
         assert session.state.total_packets == 2
         assert router.global_state.total_packets == 2
+
+
+# ---- Newly confirmed fixed-size packet reassembly tests ----
+
+class TestCombatDataReassembly:
+    """Test COMBAT_DATA (0xa50c) fixed 23-byte reassembly."""
+
+    def _make_reassembler(self) -> tuple[TCPStreamReassembler, list]:
+        r = TCPStreamReassembler()
+        r.set_framing("opcode_registry")
+        results = []
+        r.on_game_packet(lambda d, data: results.append((d, data)))
+        return r, results
+
+    def test_single_combat_data(self):
+        """Single 23-byte COMBAT_DATA passes through."""
+        r, results = self._make_reassembler()
+        cd = _make_combat_data(entity_id=42)
+        r.feed(_make_pkt("S2C", cd))
+        assert len(results) == 1
+        assert len(results[0][1]) == 23
+
+    def test_two_combat_data_coalesced(self):
+        """Two 23-byte COMBAT_DATA in one TCP segment (46 bytes)."""
+        r, results = self._make_reassembler()
+        cd1 = _make_combat_data(entity_id=1, sub_index=0)
+        cd2 = _make_combat_data(entity_id=1, sub_index=1)
+        merged = cd1 + cd2
+        assert len(merged) == 46
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 2
+        assert len(results[0][1]) == 23
+        assert len(results[1][1]) == 23
+
+    def test_three_combat_data_plus_footer(self):
+        """3 COMBAT_DATA + 1 COMBAT_FOOTER = 94 bytes (real capture pattern)."""
+        r, results = self._make_reassembler()
+        cd0 = _make_combat_data(entity_id=1, sub_index=0)
+        cd1 = _make_combat_data(entity_id=1, sub_index=1)
+        cd2 = _make_combat_data(entity_id=1, sub_index=2)
+        footer = _make_combat_footer()
+        merged = cd0 + cd1 + cd2 + footer
+        assert len(merged) == 94
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 4
+        assert len(results[0][1]) == 23  # COMBAT_DATA
+        assert len(results[1][1]) == 23  # COMBAT_DATA
+        assert len(results[2][1]) == 23  # COMBAT_DATA
+        assert len(results[3][1]) == 25  # COMBAT_FOOTER
+
+    def test_combat_data_plus_entity_position(self):
+        """2 COMBAT_DATA + COMBAT_FOOTER + ENTITY_POSITION = 97 bytes."""
+        r, results = self._make_reassembler()
+        cd1 = _make_combat_data(entity_id=1, sub_index=1)
+        cd2 = _make_combat_data(entity_id=1, sub_index=2)
+        footer = _make_combat_footer()
+        pos = _make_entity_position(entity_id=10)
+        merged = cd1 + cd2 + footer + pos
+        assert len(merged) == 97
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 4
+        assert len(results[0][1]) == 23  # COMBAT_DATA
+        assert len(results[1][1]) == 23  # COMBAT_DATA
+        assert len(results[2][1]) == 25  # COMBAT_FOOTER
+        assert len(results[3][1]) == 26  # ENTITY_POSITION
+
+    def test_combat_data_fragmented(self):
+        """23-byte COMBAT_DATA split across two TCP segments."""
+        r, results = self._make_reassembler()
+        cd = _make_combat_data(entity_id=42)
+
+        r.feed(_make_pkt("S2C", cd[:10]))
+        assert len(results) == 0
+
+        r.feed(_make_pkt("S2C", cd[10:]))
+        assert len(results) == 1
+        assert results[0][1] == cd
+
+
+class TestPlayerPositionReassembly:
+    """Test PLAYER_POSITION (0x5d0c) fixed 23-byte reassembly."""
+
+    def _make_reassembler(self) -> tuple[TCPStreamReassembler, list]:
+        r = TCPStreamReassembler()
+        r.set_framing("opcode_registry")
+        results = []
+        r.on_game_packet(lambda d, data: results.append((d, data)))
+        return r, results
+
+    def test_single_player_position(self):
+        """Single 23-byte PLAYER_POSITION."""
+        r, results = self._make_reassembler()
+        pp = _make_player_position(entity_id=1)
+        r.feed(_make_pkt("S2C", pp))
+        assert len(results) == 1
+        assert len(results[0][1]) == 23
+
+    def test_two_player_positions_coalesced(self):
+        """Two 23-byte PLAYER_POSITION in one segment (46 bytes)."""
+        r, results = self._make_reassembler()
+        pp1 = _make_player_position(entity_id=1, x=100.0, y=200.0)
+        pp2 = _make_player_position(entity_id=2, x=300.0, y=400.0)
+        merged = pp1 + pp2
+        assert len(merged) == 46
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 2
+        assert len(results[0][1]) == 23
+        assert len(results[1][1]) == 23
+
+    def test_three_player_positions_coalesced(self):
+        """Three 23-byte PLAYER_POSITION in one segment (69 bytes)."""
+        r, results = self._make_reassembler()
+        merged = (
+            _make_player_position(entity_id=1) +
+            _make_player_position(entity_id=2) +
+            _make_player_position(entity_id=3)
+        )
+        assert len(merged) == 69
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 3
+
+    def test_player_position_plus_batch_update(self):
+        """3 PLAYER_POSITION + BATCH_ENTITY_UPDATE (real capture: 192 bytes)."""
+        r, results = self._make_reassembler()
+        pp = (
+            _make_player_position(entity_id=1) +
+            _make_player_position(entity_id=2) +
+            _make_player_position(entity_id=3)
+        )
+        batch = _make_batch_entity_update(total_size=123)
+        merged = pp + batch
+        assert len(merged) == 192
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 4
+        assert all(len(results[i][1]) == 23 for i in range(3))  # 3 PLAYER_POSITION
+        assert len(results[3][1]) == 123  # BATCH_ENTITY_UPDATE
+
+    def test_player_position_fragmented(self):
+        """23-byte PLAYER_POSITION split across two TCP segments."""
+        r, results = self._make_reassembler()
+        pp = _make_player_position(entity_id=42)
+
+        r.feed(_make_pkt("S2C", pp[:12]))
+        assert len(results) == 0
+
+        r.feed(_make_pkt("S2C", pp[12:]))
+        assert len(results) == 1
+        assert results[0][1] == pp
+
+    def test_player_position_updates_state(self):
+        """PLAYER_POSITION updates entity state through router."""
+        router = ClientRouter()
+        pp = _make_player_position(entity_id=42, x=1000.5, y=2000.5)
+        pkt = _make_pkt("S2C", pp)
+        key, decoded = router.process_packet(pkt)
+
+        assert decoded is not None
+        assert decoded["name"] == "PLAYER_POSITION"
+        session = router.clients[key]
+        assert 42 in session.state.entities
+        ent = session.state.entities[42]
+        assert ent.entity_type == "player"
+        assert ent.x == 1000  # int conversion from f64
+
+
+class TestItemEventReassembly:
+    """Test ITEM_EVENT (0x4b0c) fixed 6-byte reassembly."""
+
+    def _make_reassembler(self) -> tuple[TCPStreamReassembler, list]:
+        r = TCPStreamReassembler()
+        r.set_framing("opcode_registry")
+        results = []
+        r.on_game_packet(lambda d, data: results.append((d, data)))
+        return r, results
+
+    def test_single_item_event(self):
+        """Single 6-byte ITEM_EVENT."""
+        r, results = self._make_reassembler()
+        ie = _make_item_event(entity_id=100)
+        r.feed(_make_pkt("S2C", ie))
+        assert len(results) == 1
+        assert len(results[0][1]) == 6
+
+    def test_item_event_plus_three_entity_positions(self):
+        """ITEM_EVENT + 3 ENTITY_POSITION = 84 bytes (real capture pattern)."""
+        r, results = self._make_reassembler()
+        ie = _make_item_event(entity_id=100)
+        pos1 = _make_entity_position(entity_id=1)
+        pos2 = _make_entity_position(entity_id=2)
+        pos3 = _make_entity_position(entity_id=3)
+        merged = ie + pos1 + pos2 + pos3
+        assert len(merged) == 84
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 4
+        assert len(results[0][1]) == 6   # ITEM_EVENT
+        assert len(results[1][1]) == 26  # ENTITY_POSITION
+        assert len(results[2][1]) == 26  # ENTITY_POSITION
+        assert len(results[3][1]) == 26  # ENTITY_POSITION
+
+
+class TestCombatFooterReassembly:
+    """Test COMBAT_FOOTER (0x000c) fixed 25-byte reassembly."""
+
+    def _make_reassembler(self) -> tuple[TCPStreamReassembler, list]:
+        r = TCPStreamReassembler()
+        r.set_framing("opcode_registry")
+        results = []
+        r.on_game_packet(lambda d, data: results.append((d, data)))
+        return r, results
+
+    def test_standalone_combat_footer(self):
+        """Single 25-byte COMBAT_FOOTER in its own segment."""
+        r, results = self._make_reassembler()
+        footer = _make_combat_footer()
+        r.feed(_make_pkt("S2C", footer))
+        assert len(results) == 1
+        assert len(results[0][1]) == 25
+
+    def test_combat_footer_plus_combat_update(self):
+        """COMBAT_FOOTER + COMBAT_UPDATE coalesced."""
+        r, results = self._make_reassembler()
+        footer = _make_combat_footer()
+        cu = _make_combat_update(entity_id=5)
+        merged = footer + cu
+        assert len(merged) == 63
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 2
+        assert len(results[0][1]) == 25
+        assert len(results[1][1]) == 38
+
+
+class TestImprovedBoundaryScanner:
+    """Test the improved _scan_for_next_opcode with HEARTBEAT exclusion."""
+
+    def _make_reassembler(self) -> tuple[TCPStreamReassembler, list]:
+        r = TCPStreamReassembler()
+        r.set_framing("opcode_registry")
+        results = []
+        r.on_game_packet(lambda d, data: results.append((d, data)))
+        return r, results
+
+    def test_effect_data_followed_by_entity_position(self):
+        """EFFECT_DATA (unknown framing) followed by ENTITY_POSITION.
+
+        The scanner should find EP boundary, not false HEARTBEAT within payload.
+        """
+        r, results = self._make_reassembler()
+        # Build EFFECT_DATA payload (variable, unknown framing)
+        # Use 313 bytes (observed base size), but don't embed false opcodes
+        ed = bytearray(313)
+        ed[0] = 0x33
+        ed[1] = 0x0e
+        # Fill with non-opcode bytes to avoid false positives
+        for i in range(2, 313):
+            ed[i] = 0x42
+        pos = _make_entity_position(entity_id=99)
+        merged = bytes(ed) + pos
+
+        r.feed(_make_pkt("S2C", merged))
+        # Scanner should find ENTITY_POSITION at offset 313
+        assert len(results) == 2
+        assert len(results[0][1]) == 313  # EFFECT_DATA
+        assert len(results[1][1]) == 26   # ENTITY_POSITION
+
+    def test_heartbeat_zeros_in_payload_not_false_boundary(self):
+        """Zeros within EFFECT_DATA payload should not trigger HEARTBEAT boundary."""
+        r, results = self._make_reassembler()
+        # EFFECT_DATA with internal zeros (would be false HEARTBEAT)
+        ed = bytearray(50)
+        ed[0] = 0x33
+        ed[1] = 0x0e
+        # Put zeros at various offsets (would match HEARTBEAT 0x0000)
+        ed[10:16] = b"\x00\x00\x00\x00\x00\x00"
+        ed[20:26] = b"\x00\x00\x00\x00\x00\x00"
+        # Follow with a reliable opcode
+        cu = _make_combat_update(entity_id=1)
+        merged = bytes(ed) + cu
+
+        r.feed(_make_pkt("S2C", merged))
+        # Should find COMBAT_UPDATE at offset 50, not false HEARTBEAT earlier
+        assert len(results) == 2
+        assert len(results[0][1]) == 50  # EFFECT_DATA (full payload)
+        assert len(results[1][1]) == 38  # COMBAT_UPDATE
+
+
+class TestMixedTypeReassembly:
+    """Test complex real-world coalescing patterns."""
+
+    def _make_reassembler(self) -> tuple[TCPStreamReassembler, list]:
+        r = TCPStreamReassembler()
+        r.set_framing("opcode_registry")
+        results = []
+        r.on_game_packet(lambda d, data: results.append((d, data)))
+        return r, results
+
+    def test_combat_batch_with_trailing_packets(self):
+        """Full combat batch: 2xCD + CF + TL + EP (real pattern: 112 bytes)."""
+        r, results = self._make_reassembler()
+        cd1 = _make_combat_data(entity_id=1, sub_index=1)
+        cd2 = _make_combat_data(entity_id=1, sub_index=2)
+        footer = _make_combat_footer()
+
+        # TARGET_LINK (0x680c, 15 bytes)
+        tl = bytearray(15)
+        tl[0] = 0x68
+        tl[1] = 0x0c
+        struct.pack_into("<I", tl, 2, 100)
+        struct.pack_into("<I", tl, 6, 200)
+
+        pos = _make_entity_position(entity_id=10)
+        merged = cd1 + cd2 + footer + bytes(tl) + pos
+        assert len(merged) == 112
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 5
+        sizes = [len(r[1]) for r in results]
+        assert sizes == [23, 23, 25, 15, 26]
+
+    def test_player_position_plus_entity_position_plus_batch(self):
+        """PP + EP + BATCH (real pattern: 195 bytes)."""
+        r, results = self._make_reassembler()
+        pp1 = _make_player_position(entity_id=1)
+        pp2 = _make_player_position(entity_id=2)
+        ep = _make_entity_position(entity_id=3)
+        batch = _make_batch_entity_update(total_size=123)
+        merged = pp1 + pp2 + ep + batch
+        assert len(merged) == 195
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 4
+        sizes = [len(r[1]) for r in results]
+        assert sizes == [23, 23, 26, 123]
+
+    def test_effect_then_combat_data_then_heartbeat(self):
+        """EFFECT + COMBAT_DATA + HEARTBEAT coalesced."""
+        r, results = self._make_reassembler()
+        effect = _make_effect(total_size=23)
+        cd = _make_combat_data(entity_id=1)
+        hb = _make_heartbeat()
+        merged = effect + cd + hb
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 3
+        sizes = [len(r[1]) for r in results]
+        assert sizes == [23, 23, 6]

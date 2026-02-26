@@ -166,27 +166,50 @@ class TCPStreamReassembler:
                 # Emit everything up to the next opcode as one chunk
                 data = stream.consume(found)
                 self._emit(stream.direction, data)
+                continue  # Process remaining buffer (starts with known opcode)
             else:
                 # No next opcode found — emit all remaining as one packet
                 data = stream.consume(stream.size)
                 self._emit(stream.direction, data)
-            break
+                break
+
+    # Opcodes too common in binary data to use as boundary markers
+    _SCAN_EXCLUDE = frozenset({0x0000})  # HEARTBEAT: \x00\x00 matches any two zero bytes
 
     def _scan_for_next_opcode(self, stream: StreamBuffer) -> int | None:
         """Scan buffer for the next valid opcode after position 2.
 
         Returns offset of the next opcode, or None if not found.
+        Excludes HEARTBEAT (0x0000) from candidates — too many false positives.
+        Validates candidates by checking if they lead to valid packet chains.
         """
-        from src.protocol.packet_types import KNOWN_PACKETS
+        from src.protocol.packet_types import KNOWN_PACKETS, get_packet_size
 
         buf = stream.buffer
-        # Start scanning from offset 2 (skip current opcode bytes)
-        for offset in range(2, len(buf) - 1):
+        # Start scanning from offset 4 (skip current opcode + at least 2 payload bytes)
+        for offset in range(4, len(buf) - 1):
             candidate = int.from_bytes(buf[offset:offset + 2], "big")
-            if candidate in KNOWN_PACKETS:
-                # Verify it's plausible: at least HEADER_SIZE from start
-                if offset >= 4:
+            if candidate in self._SCAN_EXCLUDE:
+                continue
+            if candidate not in KNOWN_PACKETS:
+                continue
+
+            # Validate: the candidate should be parseable (known size)
+            remaining = bytes(buf[offset:])
+            pkt_size = get_packet_size(remaining[:min(len(remaining), 8)])
+            if pkt_size is not None:
+                # Strong candidate: we know the next packet's size
+                if pkt_size <= len(remaining):
                     return offset
+                # Packet is fragmented but opcode is valid — still accept
+                return offset
+
+            # Variable-size packet with unknown framing — weaker candidate
+            # Accept only if this opcode is confirmed
+            pdef = KNOWN_PACKETS[candidate]
+            if pdef.confirmed:
+                return offset
+
         return None
 
     def _emit(self, direction: str, data: bytes) -> None:

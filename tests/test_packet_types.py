@@ -126,5 +126,25 @@ def test_get_packet_size_too_short():
 
 def test_get_packet_size_variable_no_length_field():
     """Variable-size packet without length field returns None."""
-    # COMBAT_DATA (0xa50c) has no length field
-    assert get_packet_size(b"\xa5\x0c\x00\x00") is None
+    # EFFECT_DATA (0x330e) has no length field
+    assert get_packet_size(b"\x33\x0e\x00\x00") is None
+
+
+def test_get_packet_size_combat_data_fixed():
+    """COMBAT_DATA (0xa50c) is now confirmed fixed at 23 bytes."""
+    assert get_packet_size(b"\xa5\x0c\x00\x9a") == 23
+
+
+def test_get_packet_size_combat_footer_fixed():
+    """COMBAT_FOOTER (0x000c) is fixed at 25 bytes."""
+    assert get_packet_size(b"\x00\x0c\x19\x00") == 25
+
+
+def test_get_packet_size_player_position_fixed():
+    """PLAYER_POSITION (0x5d0c) is now confirmed fixed at 23 bytes."""
+    assert get_packet_size(b"\x5d\x0c\x00\x00") == 23
+
+
+def test_get_packet_size_item_event_fixed():
+    """ITEM_EVENT (0x4b0c) is now confirmed fixed at 6 bytes."""
+    assert get_packet_size(b"\x4b\x0c\x00\x00") == 6
