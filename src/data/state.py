@@ -152,6 +152,8 @@ class RadarState:
             match name:
                 case "ENTITY_POSITION":
                     self._handle_position(decoded, pkt.timestamp)
+                case "PLAYER_POSITION":
+                    self._handle_player_position(decoded, pkt.timestamp)
                 case "ITEM_DROP":
                     self._handle_item_drop(decoded, pkt.timestamp)
                 case "ENTITY_DESPAWN":
@@ -199,6 +201,26 @@ class RadarState:
                 zone=zone if zone else 0,
             )
 
+        self._notify("position", d)
+
+    def _handle_player_position(self, d: dict, ts: float) -> None:
+        """Handle PLAYER_POSITION — uses f64 coordinates."""
+        eid = d.get("entity_id", 0)
+        if not eid:
+            return
+        ent = self.entities.get(eid)
+        if not ent:
+            ent = Entity(entity_id=eid, entity_type="player")
+            self.entities[eid] = ent
+        # PLAYER_POSITION uses f64, convert to int for consistency
+        x = d.get("x")
+        y = d.get("y")
+        if x is not None:
+            ent.x = int(x)
+        if y is not None:
+            ent.y = int(y)
+        ent.entity_type = "player"
+        ent.last_seen = ts
         self._notify("position", d)
 
     def _handle_item_drop(self, d: dict, ts: float) -> None:

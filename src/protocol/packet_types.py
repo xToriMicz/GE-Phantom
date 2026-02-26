@@ -198,8 +198,13 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x5d0c,
         name="PLAYER_POSITION",
         direction=Direction.S2C,
-        size=None,  # variable
-        description="Player character positions (contains floats/doubles)",
+        size=None,  # 46/69/192/195 — may batch multiple entries
+        description="Player character positions using f64 coordinates",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Player entity ID"),
+            FieldDef("x", 6, 8, "f64", "X coordinate (double)"),
+            FieldDef("y", 14, 8, "f64", "Y coordinate (double)"),
+        ],
         confirmed=True,
     ),
 

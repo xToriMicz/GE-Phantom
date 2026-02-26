@@ -10,3 +10,5 @@ build/
 captures/*.pcap
 captures/*.json
 .env
+*.PNG
+*.png

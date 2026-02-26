@@ -18,6 +18,7 @@ from textual.widgets import Static, RichLog, DataTable
 from textual.containers import Vertical
 
 from src.data.state import RadarState, Entity, ItemDrop, CharacterInfo
+from src.data.items import item_name, item_name_short
 
 
 def _fmt_time(ts: float) -> str:
@@ -89,7 +90,9 @@ class TrafficPanel(Vertical):
                      "attacker_id", "target_id", "attack_range", "speed", "zone"):
             if key in decoded:
                 val = decoded[key]
-                if isinstance(val, float):
+                if key == "item_id" and isinstance(val, int):
+                    fields.append(f"item={item_name(val)}")
+                elif isinstance(val, float):
                     fields.append(f"{key}={val:.0f}")
                 else:
                     fields.append(f"{key}={val}")
@@ -220,7 +223,7 @@ class DropPanel(Vertical):
 
     def on_mount(self) -> None:
         table: DataTable = self.query_one("#drop-table", DataTable)
-        table.add_columns("Time", "Item ID", "Count", "Position", "Owner", "Status")
+        table.add_columns("Time", "Item", "Count", "Position", "Owner", "Status")
 
     def refresh_drops(self, state: RadarState) -> None:
         """Rebuild drops table."""
@@ -244,7 +247,7 @@ class DropPanel(Vertical):
             mine_style = "bold yellow" if is_mine else ""
 
             ts_text = Text(_fmt_time(drop.timestamp))
-            item_text = Text(str(drop.item_id), style=mine_style or "white")
+            item_text = Text(item_name(drop.item_id), style=mine_style or "white")
             count_text = Text(str(drop.count))
             pos_text = Text(f"({drop.x}, {drop.y})")
             owner_text = Text(drop.owner_name, style=mine_style or "white")

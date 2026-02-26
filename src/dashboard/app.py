@@ -7,6 +7,10 @@ item drop alerts, and session analytics.
 Modes:
   - Live: runs GESniffer in a worker thread, feeds packets to RadarState
   - Replay: loads a saved session JSON file and replays packets
+
+Replay speed controls:
+  [ / ] — decrease / increase speed (1x, 2x, 5x, 10x, MAX)
+  x     — export session stats to JSON
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from __future__ import annotations
 import json
 import time
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from textual.app import App, ComposeResult
@@ -32,6 +37,16 @@ from src.dashboard.widgets import (
     EntitySelected,
 )
 
+# Replay speed presets: (label, multiplier)
+# multiplier=0 means unbounded (no sleep)
+SPEED_PRESETS = [
+    ("1x", 1.0),
+    ("2x", 2.0),
+    ("5x", 5.0),
+    ("10x", 10.0),
+    ("MAX", 0.0),
+]
+
 
 class GEDashboard(App):
     """GE_Phantom real-time packet dashboard."""
@@ -46,6 +61,9 @@ class GEDashboard(App):
         Binding("s", "switch_tab('session')", "Session", show=True),
         Binding("p", "toggle_pause", "Pause"),
         Binding("c", "clear_log", "Clear"),
+        Binding("left_square_bracket", "speed_down", "Slower"),
+        Binding("right_square_bracket", "speed_up", "Faster"),
+        Binding("x", "export_stats", "Export"),
     ]
 
     def __init__(
@@ -61,6 +79,17 @@ class GEDashboard(App):
         self._paused = False
         self._connected = False
         self._refresh_timer: Timer | None = None
+        # Replay speed
+        self._speed_index = 0  # index into SPEED_PRESETS
+        self._replay_done = False
+
+    @property
+    def _speed_label(self) -> str:
+        return SPEED_PRESETS[self._speed_index][0]
+
+    @property
+    def _speed_mult(self) -> float:
+        return SPEED_PRESETS[self._speed_index][1]
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="header-bar"):
@@ -94,7 +123,13 @@ class GEDashboard(App):
         status: Static = self.query_one("#status-label", Static)
         rate_label: Static = self.query_one("#rate-label", Static)
 
-        mode = "REPLAY" if self._replay_path else ("LIVE" if self._connected else "CONNECTING")
+        if self._replay_path:
+            speed_tag = f" [{self._speed_label}]"
+            done_tag = " DONE" if self._replay_done else ""
+            mode = f"REPLAY{speed_tag}{done_tag}"
+        else:
+            mode = "LIVE" if self._connected else "CONNECTING"
+
         paused = " [PAUSED]" if self._paused else ""
         status.update(f"GE_Phantom | {mode}{paused}")
 
@@ -141,7 +176,6 @@ class GEDashboard(App):
         )
 
         # Replay with timing
-        first_ts = packets[0].get("timestamp", 0)
         for i, pkt_data in enumerate(packets):
             if self._paused:
                 # Spin-wait while paused
@@ -170,15 +204,25 @@ class GEDashboard(App):
             if decoded:
                 self.call_from_thread(self._log_packet, decoded)
 
-            # Simulate timing gap (capped at 0.5s to avoid long waits)
+            # Simulate timing gap, adjusted by speed multiplier
             if i + 1 < len(packets):
                 next_ts = packets[i + 1].get("timestamp", 0)
                 gap = next_ts - pkt_data.get("timestamp", 0)
-                if 0 < gap < 0.5:
-                    time.sleep(gap)
-                elif gap >= 0.5:
-                    time.sleep(0.05)  # fast-forward large gaps
+                mult = self._speed_mult
 
+                if mult == 0.0:
+                    # MAX speed — no sleep at all
+                    pass
+                elif gap > 0:
+                    # Scale the gap by speed, cap at 0.5s real-time
+                    scaled = gap / mult
+                    if scaled > 0.5:
+                        scaled = 0.05
+                    if scaled > 0.001:
+                        time.sleep(scaled)
+
+        self._replay_done = True
+        self.call_from_thread(self._update_header)
         self.call_from_thread(self.notify, "Replay complete")
 
     # ---- UI updates ----
@@ -235,6 +279,73 @@ class GEDashboard(App):
             panel.clear_log()
         except Exception:
             pass
+
+    def action_speed_up(self) -> None:
+        """Increase replay speed."""
+        if not self._replay_path:
+            return
+        if self._speed_index < len(SPEED_PRESETS) - 1:
+            self._speed_index += 1
+            self._update_header()
+            self.notify(f"Speed: {self._speed_label}")
+
+    def action_speed_down(self) -> None:
+        """Decrease replay speed."""
+        if not self._replay_path:
+            return
+        if self._speed_index > 0:
+            self._speed_index -= 1
+            self._update_header()
+            self.notify(f"Speed: {self._speed_label}")
+
+    def action_export_stats(self) -> None:
+        """Export session stats to a JSON file."""
+        export = self._build_export()
+        out_dir = Path("data")
+        out_dir.mkdir(exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = out_dir / f"export_{ts}.json"
+        out_path.write_text(json.dumps(export, indent=2, default=str))
+        self.notify(f"Exported to {out_path}")
+
+    def _build_export(self) -> dict:
+        """Build a session stats dict for export."""
+        elapsed = time.time() - self.state.start_time
+        with self.state._lock:
+            entities = [
+                {
+                    "entity_id": e.entity_id,
+                    "type": e.entity_type,
+                    "x": e.x,
+                    "y": e.y,
+                    "name": e.name,
+                }
+                for e in self.state.entities.values()
+            ]
+            drops = [
+                {
+                    "timestamp": d.timestamp,
+                    "entity_id": d.entity_id,
+                    "item_id": d.item_id,
+                    "count": d.count,
+                    "x": d.x,
+                    "y": d.y,
+                    "owner_name": d.owner_name,
+                    "picked_up": d.picked_up,
+                }
+                for d in self.state.item_drops
+            ]
+        return {
+            "exported_at": datetime.now().isoformat(),
+            "session": {
+                "duration_seconds": round(elapsed, 1),
+                "total_packets": self.state.total_packets,
+                "packet_rate": round(self.state.stats.rate(), 1),
+            },
+            "packet_counts": dict(self.state.packet_counts),
+            "entities": entities,
+            "item_drops": drops,
+        }
 
     def on_entity_selected(self, event: EntitySelected) -> None:
         """Handle entity row selection from EntityPanel."""
