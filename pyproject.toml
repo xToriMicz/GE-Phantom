@@ -1,0 +1,16 @@
+[project]
+name = "ge-phantom"
+version = "0.1.0"
+description = "Granado Espada packet-based bot — Auto Pick Item first"
+requires-python = ">=3.11"
+dependencies = [
+    "scapy>=2.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

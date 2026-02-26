@@ -1,0 +1,10 @@
+{
+    "servers": {
+        "th": {
+            "name": "Granado Espada TH",
+            "ips": ["103.55.55.138"],
+            "ports": [7000, 7001],
+            "note": "Main game server"
+        }
+    }
+}
