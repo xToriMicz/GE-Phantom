@@ -267,9 +267,15 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x330e,
         name="EFFECT_DATA",
         direction=Direction.S2C,
-        size=None,  # variable: ~313-391 bytes observed — follows EFFECT packets
-        description="Effect data payload — often follows EFFECT (0x4a0e), framing uses boundary scan",
-        confirmed=False,
+        size=15,  # confirmed fixed — backward analysis: 18/24 validated boundaries at offset 15
+        description="Effect data — entity effect trigger with param and type",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("effect_param", 6, 4, "u32le", "Effect parameter/value"),
+            FieldDef("effect_type", 10, 1, "u8", "Effect type"),
+            FieldDef("effect_data", 11, 4, "bytes", "Effect data (often zeros)"),
+        ],
+        confirmed=True,
     ),
 
     0x000c: PacketDef(
@@ -330,18 +336,26 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x5c0c,
         name="ENTITY_DATA",
         direction=Direction.S2C,
-        size=None,  # variable: 9-1412b observed
-        description="Entity detailed data (variable length)",
-        confirmed=False,
+        size=270,  # confirmed fixed — 12/17 validated embeddings at offset 270
+        description="Entity detailed data block (270 bytes)",
+        fields=[
+            FieldDef("data_id", 2, 4, "u32le", "Data/sequence ID"),
+            FieldDef("entity_ref", 10, 4, "u32le", "Referenced entity ID"),
+        ],
+        confirmed=True,
     ),
 
     0x620c: PacketDef(
         opcode=0x620c,
         name="COMBAT_EFFECT",
         direction=Direction.S2C,
-        size=None,  # variable: 24-168b observed
+        size=44,  # confirmed fixed — 31/39 validated embeddings at offset 44
         description="Combat effect / damage display data",
-        confirmed=False,
+        fields=[
+            FieldDef("effect_id", 2, 4, "u32le", "Effect ID"),
+            FieldDef("entity_id", 4, 4, "u32le", "Target entity ID"),
+        ],
+        confirmed=True,
     ),
 
     0x660e: PacketDef(
@@ -357,9 +371,12 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x6b0c,
         name="ENTITY_MOVE_PATH",
         direction=Direction.S2C,
-        size=None,  # variable: 60, 105b — contains position + path data
+        size=60,  # confirmed fixed — 7/8 = 60b, 105=60+45(coalesced); validated at offset 60
         description="Entity movement path with waypoints",
-        confirmed=False,
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+        ],
+        confirmed=True,
     ),
 
     0x6c0c: PacketDef(
@@ -375,9 +392,12 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x6d0c,
         name="ENTITY_MOVE_DETAIL",
         direction=Direction.S2C,
-        size=None,  # variable: 72, 160b — position + extended movement data
+        size=72,  # confirmed fixed — 4/5 = 72b, 160=72+88(coalesced); validated at offset 72
         description="Detailed entity movement with coords and state",
-        confirmed=False,
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+        ],
+        confirmed=True,
     ),
 
     0x750c: PacketDef(
@@ -414,18 +434,23 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x380c,
         name="ZONE_DATA",
         direction=Direction.S2C,
-        size=None,  # variable: 395-1412b — large zone/map data
-        description="Zone or map data payload (large, variable)",
-        confirmed=False,
+        size=None,  # variable: uses embedded length field
+        description="Zone or map data payload (large, variable with length field)",
+        confirmed=True,
+        length_field_offset=2,  # b[2:4] u16le = total packet size (verified: b24=757 matches embedding@757)
+        length_field_includes_header=True,
     ),
 
     0x2f0c: PacketDef(
         opcode=0x2f0c,
         name="ENTITY_GROUP",
         direction=Direction.S2C,
-        size=None,  # variable: 6-130b — compound packet embedding other opcodes
-        description="Entity group update — embeds child packets (0x6d0c, 0x750c, etc.)",
-        confirmed=False,
+        size=6,  # confirmed fixed — 5/7 = 6b; 66=6+60(MOVE_PATH), 130=6+72(MOVE_DETAIL)+52(BATCH)
+        description="Entity group header — followed by child movement packets",
+        fields=[
+            FieldDef("group_id", 2, 4, "u32le", "Group/batch ID (always 4 observed)"),
+        ],
+        confirmed=True,
     ),
 
     0x1b15: PacketDef(
