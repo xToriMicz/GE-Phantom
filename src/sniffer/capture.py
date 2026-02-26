@@ -17,7 +17,7 @@ from scapy.all import IP, TCP, sniff, conf
 
 # Default GE server config
 DEFAULT_SERVER_IPS = ["103.55.55.138"]
-DEFAULT_PORTS = [7000, 7001]
+DEFAULT_PORTS = [7000, 7001, 7008]
 
 
 @dataclass
