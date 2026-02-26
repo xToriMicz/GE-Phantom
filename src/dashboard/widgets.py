@@ -18,6 +18,7 @@ from textual.widgets import Static, RichLog, DataTable
 from textual.containers import Vertical
 
 from src.data.state import RadarState, Entity, ItemDrop, CharacterInfo
+from src.data.router import ClientRouter, ClientSession
 from src.data.items import item_name, item_name_short
 
 
@@ -307,3 +308,70 @@ class SessionPanel(Vertical):
                 lines.append(f"  {name:<25s} {count:>6d}  ({r:.1f}/s)")
 
         stats.update("\n".join(lines))
+
+
+# ---- 5. Client Panel ----
+
+class ClientPanel(Vertical):
+    """Connected clients list with session details."""
+
+    def compose(self):
+        yield Static("", id="client-summary")
+        table = DataTable(id="client-table")
+        table.cursor_type = "row"
+        yield table
+
+    def on_mount(self) -> None:
+        table: DataTable = self.query_one("#client-table", DataTable)
+        table.add_columns("#", "Label", "Endpoint", "Packets", "Entities", "Drops", "Reconnects", "Last Seen")
+
+    def refresh_clients(self, router: ClientRouter, stale_timeout: float = 300.0) -> None:
+        """Rebuild client table from router state."""
+        table: DataTable = self.query_one("#client-table", DataTable)
+        summary: Static = self.query_one("#client-summary", Static)
+        table.clear()
+
+        clients = router.get_active_clients()
+        now = time.time()
+
+        n_stale = sum(1 for c in clients if c.is_stale(stale_timeout, now))
+        summary.update(
+            f" Clients: {len(clients)} connected"
+            + (f" | {n_stale} stale" if n_stale else "")
+        )
+
+        for i, session in enumerate(clients, 1):
+            is_stale = session.is_stale(stale_timeout, now)
+            style = "dim" if is_stale else ""
+
+            idx_text = Text(str(i), style=style)
+            label_text = Text(session.label, style=f"bold {style}" if not is_stale else style)
+            key_text = Text(session.client_key, style="bright_black")
+            pkts_text = Text(str(session.state.total_packets), style=style)
+
+            with session.state._lock:
+                n_ents = len(session.state.entities)
+                n_drops = len(session.state.item_drops)
+            ents_text = Text(str(n_ents), style=style)
+            drops_text = Text(str(n_drops), style=style)
+
+            reconn_text = Text(
+                str(session.reconnect_count) if session.reconnect_count else "-",
+                style="yellow" if session.reconnect_count else style,
+            )
+
+            ago = now - session.last_seen if session.last_seen else 0
+            if ago < 2:
+                seen_text = Text("now", style="green")
+            elif ago < 10:
+                seen_text = Text(f"{ago:.0f}s ago", style="yellow")
+            elif is_stale:
+                seen_text = Text(f"{_fmt_elapsed(ago)} ago", style="red")
+            else:
+                seen_text = Text(f"{ago:.0f}s ago", style=style)
+
+            table.add_row(
+                idx_text, label_text, key_text, pkts_text,
+                ents_text, drops_text, reconn_text, seen_text,
+                key=session.client_key,
+            )

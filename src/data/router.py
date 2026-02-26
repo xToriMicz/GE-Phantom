@@ -28,6 +28,12 @@ class ClientSession:
     state: RadarState
     first_seen: float
     last_seen: float = 0.0
+    reconnect_count: int = 0  # times this char reconnected on a new port
+
+    def is_stale(self, timeout: float, now: float | None = None) -> bool:
+        """Check if client hasn't been seen within timeout seconds."""
+        now = now or time.time()
+        return (now - self.last_seen) > timeout
 
 
 ClientCallback = Callable[[ClientSession], None]
@@ -39,7 +45,14 @@ class ClientRouter:
     Client identity = local endpoint (ip:port):
       - C2S packets: src_ip:src_port is the client
       - S2C packets: dst_ip:dst_port is the client
+
+    Features:
+      - Stale pruning: remove clients not seen within a timeout
+      - Reconnect detection: same character name on a new port
     """
+
+    # Default stale timeout: 5 minutes of no packets
+    DEFAULT_STALE_TIMEOUT: float = 300.0
 
     def __init__(self, my_chars: list[str] | None = None):
         self._my_chars = my_chars
@@ -48,6 +61,8 @@ class ClientRouter:
         self._next_label: int = 1
         self._callbacks: list[ClientCallback] = []
         self._lock = threading.Lock()
+        # Map character name (lowercase) → client_key for reconnect detection
+        self._char_to_key: dict[str, str] = {}
 
     def process_packet(self, pkt: GEPacket) -> tuple[str, dict | None]:
         """Route packet to correct client. Returns (client_key, decoded)."""
@@ -101,15 +116,34 @@ class ClientRouter:
         return session
 
     def _maybe_upgrade_label(self, session: ClientSession, decoded: dict) -> None:
-        """If ITEM_DROP has owner_name, upgrade label from 'Client N' to char name."""
+        """If ITEM_DROP has owner_name, upgrade label from 'Client N' to char name.
+
+        Also handles reconnect detection: if another session already has this
+        character name, the old session is stale — transfer identity.
+        """
         if decoded.get("name") != "ITEM_DROP":
             return
         owner = decoded.get("owner_name", "").strip()
         if not owner:
             return
         # Only upgrade if still using default label
-        if session.label.startswith("Client "):
+        if not session.label.startswith("Client "):
+            return
+
+        owner_lower = owner.lower()
+
+        with self._lock:
+            old_key = self._char_to_key.get(owner_lower)
+            if old_key and old_key != session.client_key:
+                # Reconnect: same char, new port
+                old_session = self.clients.get(old_key)
+                if old_session:
+                    session.reconnect_count = old_session.reconnect_count + 1
+                    # Remove old stale session
+                    del self.clients[old_key]
+
             session.label = owner
+            self._char_to_key[owner_lower] = session.client_key
 
     def get_active_clients(self) -> list[ClientSession]:
         """List clients sorted by last_seen (most recent first)."""
@@ -127,3 +161,35 @@ class ClientRouter:
     def on_client_discovered(self, callback: ClientCallback) -> None:
         """Subscribe to new client events."""
         self._callbacks.append(callback)
+
+    def prune_stale(self, timeout: float | None = None, now: float | None = None) -> list[ClientSession]:
+        """Remove clients not seen within timeout seconds.
+
+        Returns list of pruned sessions (for logging/notification).
+        """
+        timeout = timeout if timeout is not None else self.DEFAULT_STALE_TIMEOUT
+        now = now or time.time()
+        pruned: list[ClientSession] = []
+
+        with self._lock:
+            stale_keys = [
+                key for key, session in self.clients.items()
+                if session.is_stale(timeout, now)
+            ]
+            for key in stale_keys:
+                session = self.clients.pop(key)
+                pruned.append(session)
+                # Clean up char→key mapping
+                label_lower = session.label.lower()
+                if self._char_to_key.get(label_lower) == key:
+                    del self._char_to_key[label_lower]
+
+        return pruned
+
+    def find_client_by_char(self, char_name: str) -> ClientSession | None:
+        """Find a client session by character name (case-insensitive)."""
+        with self._lock:
+            key = self._char_to_key.get(char_name.lower())
+            if key:
+                return self.clients.get(key)
+        return None

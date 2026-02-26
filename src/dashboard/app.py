@@ -39,6 +39,7 @@ from src.dashboard.widgets import (
     EntityPanel,
     DropPanel,
     SessionPanel,
+    ClientPanel,
     EntitySelected,
 )
 
@@ -69,6 +70,7 @@ class GEDashboard(App):
         Binding("left_square_bracket", "speed_down", "Slower"),
         Binding("right_square_bracket", "speed_up", "Faster"),
         Binding("x", "export_stats", "Export"),
+        Binding("l", "switch_tab('clients')", "Clients", show=True),
         # Client switching: 0 = global, 1-9 = per-client
         Binding("0", "switch_client(0)", "Global", show=False),
         Binding("1", "switch_client(1)", "", show=False),
@@ -132,6 +134,8 @@ class GEDashboard(App):
                 yield DropPanel()
             with TabPane("Session", id="session"):
                 yield SessionPanel()
+            with TabPane("Clients", id="clients"):
+                yield ClientPanel()
         yield Footer()
 
     def on_mount(self) -> None:
@@ -284,6 +288,11 @@ class GEDashboard(App):
 
     def _periodic_refresh(self) -> None:
         """Refresh tables and stats periodically."""
+        # Prune stale clients every refresh cycle
+        pruned = self.router.prune_stale()
+        for session in pruned:
+            self.notify(f"Pruned stale client: {session.label}")
+
         self._update_header()
 
         state = self._active_state
@@ -308,6 +317,12 @@ class GEDashboard(App):
             try:
                 panel: SessionPanel = self.query_one(SessionPanel)
                 panel.refresh_session(state)
+            except Exception:
+                pass
+        elif active == "clients":
+            try:
+                panel: ClientPanel = self.query_one(ClientPanel)
+                panel.refresh_clients(self.router)
             except Exception:
                 pass
 

@@ -312,3 +312,239 @@ class TestGetActiveClients:
         session = list(router.clients.values())[0]
         assert session.state.my_chars == {"kaja", "scoutz"}
         assert router.global_state.my_chars == {"kaja", "scoutz"}
+
+
+class TestClientSessionStale:
+    """Test ClientSession.is_stale() method."""
+
+    def test_fresh_client_not_stale(self):
+        from src.data.state import RadarState
+        session = ClientSession(
+            client_key="192.168.1.100:54321",
+            label="Client 1",
+            state=RadarState(),
+            first_seen=1000.0,
+            last_seen=1000.0,
+        )
+        assert not session.is_stale(300.0, now=1100.0)
+
+    def test_old_client_is_stale(self):
+        from src.data.state import RadarState
+        session = ClientSession(
+            client_key="192.168.1.100:54321",
+            label="Client 1",
+            state=RadarState(),
+            first_seen=1000.0,
+            last_seen=1000.0,
+        )
+        assert session.is_stale(300.0, now=1500.0)  # 500s > 300s timeout
+
+    def test_boundary_not_stale(self):
+        from src.data.state import RadarState
+        session = ClientSession(
+            client_key="192.168.1.100:54321",
+            label="Client 1",
+            state=RadarState(),
+            first_seen=1000.0,
+            last_seen=1000.0,
+        )
+        # Exactly at boundary: 300s == 300s → not stale (> not >=)
+        assert not session.is_stale(300.0, now=1300.0)
+
+
+class TestStalePruning:
+    """Test ClientRouter.prune_stale() method."""
+
+    def test_prune_removes_stale_client(self):
+        router = ClientRouter()
+        payload = _make_entity_position_payload()
+
+        # Client 1 last seen at t=1000
+        pkt1 = _make_packet(dst_port=54321, payload=payload, timestamp=1000.0)
+        router.process_packet(pkt1)
+
+        # Client 2 last seen at t=2000
+        pkt2 = _make_packet(dst_port=54322, payload=payload, timestamp=2000.0)
+        router.process_packet(pkt2)
+
+        assert len(router.clients) == 2
+
+        # Prune with 60s timeout at t=2050 → client 1 is 1050s stale
+        pruned = router.prune_stale(timeout=60.0, now=2050.0)
+        assert len(pruned) == 1
+        assert pruned[0].client_key.endswith(":54321")
+        assert len(router.clients) == 1
+
+    def test_prune_keeps_fresh_clients(self):
+        router = ClientRouter()
+        payload = _make_entity_position_payload()
+
+        pkt = _make_packet(dst_port=54321, payload=payload, timestamp=1000.0)
+        router.process_packet(pkt)
+
+        pruned = router.prune_stale(timeout=60.0, now=1030.0)
+        assert len(pruned) == 0
+        assert len(router.clients) == 1
+
+    def test_prune_cleans_char_mapping(self):
+        """Pruning a named client should clean up _char_to_key."""
+        router = ClientRouter()
+
+        # Create client and upgrade its label
+        drop = _make_item_drop_payload(owner_name="Kaja")
+        pkt = _make_packet(dst_port=54321, payload=drop, timestamp=1000.0)
+        router.process_packet(pkt)
+
+        assert router.find_client_by_char("Kaja") is not None
+
+        # Prune it
+        pruned = router.prune_stale(timeout=60.0, now=2000.0)
+        assert len(pruned) == 1
+        assert router.find_client_by_char("Kaja") is None
+
+    def test_prune_returns_empty_on_no_stale(self):
+        router = ClientRouter()
+        pruned = router.prune_stale(timeout=60.0, now=1000.0)
+        assert pruned == []
+
+    def test_prune_default_timeout(self):
+        """Default timeout is 300 seconds."""
+        router = ClientRouter()
+        payload = _make_entity_position_payload()
+
+        pkt = _make_packet(dst_port=54321, payload=payload, timestamp=1000.0)
+        router.process_packet(pkt)
+
+        # At t=1200 (200s), should not be pruned with default 300s timeout
+        pruned = router.prune_stale(now=1200.0)
+        assert len(pruned) == 0
+
+        # At t=1400 (400s), should be pruned
+        pruned = router.prune_stale(now=1400.0)
+        assert len(pruned) == 1
+
+
+class TestReconnectDetection:
+    """Test character reconnect detection (same char, new port)."""
+
+    def test_reconnect_removes_old_session(self):
+        router = ClientRouter()
+
+        # Client 1 on port 54321 is "Kaja"
+        drop1 = _make_item_drop_payload(owner_name="Kaja")
+        pkt1 = _make_packet(dst_port=54321, payload=drop1, timestamp=1000.0)
+        router.process_packet(pkt1)
+        assert len(router.clients) == 1
+
+        old_key = "192.168.1.100:54321"
+        assert router.clients[old_key].label == "Kaja"
+
+        # Client reconnects on port 54400 — first sees a position packet
+        pos = _make_entity_position_payload()
+        pkt2 = _make_packet(dst_port=54400, payload=pos, timestamp=2000.0)
+        router.process_packet(pkt2)
+        assert len(router.clients) == 2  # both exist for now
+
+        # Then ITEM_DROP reveals it's "Kaja" again
+        drop2 = _make_item_drop_payload(owner_name="Kaja")
+        pkt3 = _make_packet(dst_port=54400, payload=drop2, timestamp=2001.0)
+        router.process_packet(pkt3)
+
+        # Old session should be removed, new one keeps the label
+        assert len(router.clients) == 1
+        new_key = "192.168.1.100:54400"
+        assert new_key in router.clients
+        assert old_key not in router.clients
+        assert router.clients[new_key].label == "Kaja"
+
+    def test_reconnect_increments_count(self):
+        router = ClientRouter()
+
+        # First connection
+        drop1 = _make_item_drop_payload(owner_name="Kaja")
+        pkt1 = _make_packet(dst_port=54321, payload=drop1, timestamp=1000.0)
+        router.process_packet(pkt1)
+        assert router.clients["192.168.1.100:54321"].reconnect_count == 0
+
+        # Reconnect #1
+        drop2 = _make_item_drop_payload(owner_name="Kaja")
+        pkt2 = _make_packet(dst_port=54400, payload=drop2, timestamp=2000.0)
+        router.process_packet(pkt2)
+        assert router.clients["192.168.1.100:54400"].reconnect_count == 1
+
+        # Reconnect #2
+        drop3 = _make_item_drop_payload(owner_name="Kaja")
+        pkt3 = _make_packet(dst_port=54500, payload=drop3, timestamp=3000.0)
+        router.process_packet(pkt3)
+        assert router.clients["192.168.1.100:54500"].reconnect_count == 2
+
+    def test_different_chars_no_reconnect(self):
+        """Two different character names should NOT trigger reconnect."""
+        router = ClientRouter()
+
+        drop1 = _make_item_drop_payload(owner_name="Kaja")
+        pkt1 = _make_packet(dst_port=54321, payload=drop1, timestamp=1000.0)
+        router.process_packet(pkt1)
+
+        drop2 = _make_item_drop_payload(owner_name="Scoutz")
+        pkt2 = _make_packet(dst_port=54322, payload=drop2, timestamp=1001.0)
+        router.process_packet(pkt2)
+
+        assert len(router.clients) == 2
+
+    def test_reconnect_updates_char_mapping(self):
+        router = ClientRouter()
+
+        # Kaja on port 54321
+        drop1 = _make_item_drop_payload(owner_name="Kaja")
+        pkt1 = _make_packet(dst_port=54321, payload=drop1, timestamp=1000.0)
+        router.process_packet(pkt1)
+
+        session = router.find_client_by_char("Kaja")
+        assert session is not None
+        assert session.client_key == "192.168.1.100:54321"
+
+        # Kaja reconnects on port 54400
+        drop2 = _make_item_drop_payload(owner_name="Kaja")
+        pkt2 = _make_packet(dst_port=54400, payload=drop2, timestamp=2000.0)
+        router.process_packet(pkt2)
+
+        session = router.find_client_by_char("Kaja")
+        assert session is not None
+        assert session.client_key == "192.168.1.100:54400"
+
+
+class TestFindClientByChar:
+    """Test find_client_by_char lookup."""
+
+    def test_find_named_client(self):
+        router = ClientRouter()
+        drop = _make_item_drop_payload(owner_name="Kaja")
+        pkt = _make_packet(dst_port=54321, payload=drop, timestamp=1000.0)
+        router.process_packet(pkt)
+
+        session = router.find_client_by_char("Kaja")
+        assert session is not None
+        assert session.label == "Kaja"
+
+    def test_find_case_insensitive(self):
+        router = ClientRouter()
+        drop = _make_item_drop_payload(owner_name="Kaja")
+        pkt = _make_packet(dst_port=54321, payload=drop, timestamp=1000.0)
+        router.process_packet(pkt)
+
+        assert router.find_client_by_char("kaja") is not None
+        assert router.find_client_by_char("KAJA") is not None
+
+    def test_find_unknown_returns_none(self):
+        router = ClientRouter()
+        assert router.find_client_by_char("Unknown") is None
+
+    def test_find_unnamed_client_returns_none(self):
+        """Clients with default 'Client N' labels aren't in char mapping."""
+        router = ClientRouter()
+        payload = _make_entity_position_payload()
+        pkt = _make_packet(dst_port=54321, payload=payload, timestamp=1000.0)
+        router.process_packet(pkt)
+
+        assert router.find_client_by_char("Client 1") is None

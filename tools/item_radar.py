@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.sniffer.capture import GESniffer, GEPacket
 from src.data.state import RadarState, Entity, ItemDrop
+from src.data.router import ClientRouter, ClientSession
 
 
 # ---- Display ----
@@ -40,18 +41,19 @@ def format_elapsed(seconds: float) -> str:
     return f"{m}m{s:02d}s"
 
 
-def print_drop_alert(drop: ItemDrop, is_mine: bool) -> None:
+def print_drop_alert(drop: ItemDrop, is_mine: bool, client_label: str = "") -> None:
     """Print a prominent alert for an item drop."""
     ts = format_time(drop.timestamp)
     mine_tag = " [MINE]" if is_mine else ""
+    client_tag = f" [{client_label}]" if client_label else ""
 
     print()
     if is_mine:
         print(f"  {'*' * 56}")
-        print(f"  *  ITEM DROP{mine_tag:<42}*")
+        print(f"  *  ITEM DROP{mine_tag}{client_tag:<{42 - len(mine_tag)}}*")
     else:
         print(f"  {'=' * 56}")
-        print(f"  |  ITEM DROP{mine_tag:<42}|")
+        print(f"  |  ITEM DROP{mine_tag}{client_tag:<{42 - len(mine_tag)}}|")
 
     border = "*" if is_mine else "|"
     print(f"  {border}  Time:     {ts:<42}{border}")
@@ -67,8 +69,9 @@ def print_drop_alert(drop: ItemDrop, is_mine: bool) -> None:
     print()
 
 
-def print_status(state: RadarState) -> None:
+def print_status(router: ClientRouter) -> None:
     """Print current radar status summary."""
+    state = router.global_state
     elapsed = time.time() - state.start_time
     with state._lock:
         n_entities = len(state.entities)
@@ -85,11 +88,18 @@ def print_status(state: RadarState) -> None:
         top = sorted(state.packet_counts.items(), key=lambda x: -x[1])[:8]
         counts = ", ".join(f"{n}={c}" for n, c in top)
         print(f"  Types:    {counts}")
+
+    clients = router.get_active_clients()
+    if clients:
+        print(f"  Clients:  {len(clients)}")
+        for i, c in enumerate(clients, 1):
+            print(f"    {i}. {c.label} ({c.client_key}) — {c.state.total_packets} pkts")
     print()
 
 
-def print_drops_history(state: RadarState) -> None:
+def print_drops_history(router: ClientRouter) -> None:
     """Print recent item drops."""
+    state = router.global_state
     with state._lock:
         recent = state.item_drops[-10:]
 
@@ -107,6 +117,24 @@ def print_drops_history(state: RadarState) -> None:
     print()
 
 
+def print_clients(router: ClientRouter) -> None:
+    """Print connected clients list."""
+    clients = router.get_active_clients()
+    if not clients:
+        print("\n  No clients detected yet.\n")
+        return
+
+    print(f"\n  --- Connected Clients ({len(clients)}) ---")
+    now = time.time()
+    for i, c in enumerate(clients, 1):
+        ago = now - c.last_seen if c.last_seen else 0
+        stale = " [STALE]" if c.is_stale(300.0, now) else ""
+        reconn = f" (reconn x{c.reconnect_count})" if c.reconnect_count else ""
+        print(f"  {i}. {c.label} — {c.client_key} — "
+              f"{c.state.total_packets} pkts — {ago:.0f}s ago{reconn}{stale}")
+    print()
+
+
 # ---- Main ----
 
 def run_radar(
@@ -114,14 +142,11 @@ def run_radar(
     my_chars: list[str] | None = None,
     verbose: bool = False,
 ):
-    state = RadarState(my_chars=my_chars)
+    router = ClientRouter(my_chars=my_chars)
     sniffer = GESniffer(iface=iface)
 
-    last_drop_count = 0
-
     def on_packet(pkt: GEPacket) -> None:
-        nonlocal last_drop_count
-        decoded = state.process_packet(pkt)
+        key, decoded = router.process_packet(pkt)
 
         if not decoded:
             if verbose:
@@ -133,10 +158,12 @@ def run_radar(
 
         # Alert on new item drops
         if name == "ITEM_DROP":
+            state = router.global_state
             drop = state.item_drops[-1]
             is_mine = state.is_mine(drop.owner_name)
-            print_drop_alert(drop, is_mine)
-            last_drop_count = len(state.item_drops)
+            session = router.clients.get(key)
+            client_label = session.label if session else ""
+            print_drop_alert(drop, is_mine, client_label)
 
         elif verbose and name not in ("HEARTBEAT", "ACK", "KEEPALIVE"):
             ts = format_time(pkt.timestamp)
@@ -152,7 +179,7 @@ def run_radar(
     t.start()
 
     print("=" * 60)
-    print("  GE_Phantom — Item Radar")
+    print("  GE_Phantom — Item Radar (multiclient)")
     print("=" * 60)
     print()
     if my_chars:
@@ -162,7 +189,8 @@ def run_radar(
     print()
     print("  Commands:")
     print("    s = status        d = drop history")
-    print("    v = toggle verbose    q = quit")
+    print("    c = client list   v = toggle verbose")
+    print("    q = quit")
     print()
     print("  Listening for item drops...")
     print()
@@ -174,9 +202,11 @@ def run_radar(
             if user_input == "q":
                 break
             elif user_input == "s":
-                print_status(state)
+                print_status(router)
             elif user_input == "d":
-                print_drops_history(state)
+                print_drops_history(router)
+            elif user_input == "c":
+                print_clients(router)
             elif user_input == "v":
                 verbose = not verbose
                 print(f"\n  Verbose: {'ON' if verbose else 'OFF'}\n")
@@ -185,6 +215,7 @@ def run_radar(
         pass
 
     # Summary on exit
+    state = router.global_state
     print(f"\n{'=' * 60}")
     print(f"  Session Summary")
     print(f"{'=' * 60}")
@@ -193,6 +224,7 @@ def run_radar(
     print(f"  Packets:   {state.total_packets}")
     print(f"  Entities:  {len(state.entities)} tracked")
     print(f"  Drops:     {len(state.item_drops)} total")
+    print(f"  Clients:   {len(router.clients)}")
 
     if state.item_drops:
         mine = [d for d in state.item_drops if state.is_mine(d.owner_name)]
