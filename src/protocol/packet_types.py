@@ -203,12 +203,13 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x5d0c,
         name="PLAYER_POSITION",
         direction=Direction.S2C,
-        size=None,  # variable: 46/69/192/195 — may batch multiple entries
-        description="Player character positions using f64 coordinates",
+        size=23,  # confirmed fixed — 46=2x23, 69=3x23 were TCP-coalesced
+        description="Player character position using f64 coordinates",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Player entity ID"),
             FieldDef("x", 6, 8, "f64", "X coordinate (double)"),
             FieldDef("y", 14, 8, "f64", "Y coordinate (double)"),
+            FieldDef("flags", 22, 1, "u8", "Movement/state flags"),
         ],
         confirmed=True,
     ),
@@ -230,9 +231,13 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0xa50c,
         name="COMBAT_DATA",
         direction=Direction.S2C,
-        size=None,  # variable: 23, 71, 94, etc. — framing unknown
-        description="Combat data — appears during fights, details unknown",
-        confirmed=False,
+        size=23,  # confirmed fixed — 71=2x23+25(COMBAT_FOOTER), 94=3x23+25 were TCP-coalesced
+        description="Combat data entry — multiple may be coalesced, followed by COMBAT_FOOTER",
+        fields=[
+            FieldDef("sub_index", 2, 1, "u8", "Entry index within batch (0, 1, 2)"),
+            FieldDef("entity_id", 4, 4, "u32le", "Entity ID"),
+        ],
+        confirmed=True,
     ),
 
     0x4a0e: PacketDef(
@@ -250,17 +255,194 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x4b0c,
         name="ITEM_EVENT",
         direction=Direction.S2C,
-        size=None,  # variable: 6 or 84 — framing unknown
+        size=6,  # confirmed fixed — 84=6+3x26(ENTITY_POSITION) were TCP-coalesced
         description="Item-related event (pickup confirmation?)",
-        confirmed=False,
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Item entity ID"),
+        ],
+        confirmed=True,
     ),
 
     0x330e: PacketDef(
         opcode=0x330e,
         name="EFFECT_DATA",
         direction=Direction.S2C,
-        size=None,  # variable: 357, 370, 371, 395 — follows EFFECT packets
-        description="Effect data payload — often follows EFFECT (0x4a0e)",
+        size=None,  # variable: ~313-391 bytes observed — follows EFFECT packets
+        description="Effect data payload — often follows EFFECT (0x4a0e), framing uses boundary scan",
+        confirmed=False,
+    ),
+
+    0x000c: PacketDef(
+        opcode=0x000c,
+        name="COMBAT_FOOTER",
+        direction=Direction.S2C,
+        size=25,  # confirmed fixed — appears after COMBAT_DATA batches (2+ entries)
+        description="Combat batch summary/footer — follows sequence of COMBAT_DATA entries",
+        confirmed=True,
+    ),
+
+    # ---- Discovered from live capture (2026-02-26) ----
+
+    0x3d0c: PacketDef(
+        opcode=0x3d0c,
+        name="ENTITY_FLAG",
+        direction=Direction.S2C,
+        size=7,  # confirmed — 21=3x7 coalesced, gap analysis 8 occurrences
+        description="Entity flag/status change",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("flag", 6, 1, "u8", "Flag value"),
+        ],
+        confirmed=True,
+    ),
+
+    0x460c: PacketDef(
+        opcode=0x460c,
+        name="PLAYER_SPAWN",
+        direction=Direction.S2C,
+        size=334,  # confirmed — all 4 occurrences = 334b
+        description="Player character spawn (similar size to MONSTER_SPAWN 371b)",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+        ],
+        confirmed=True,
+    ),
+
+    0x530d: PacketDef(
+        opcode=0x530d,
+        name="ENTITY_STAT",
+        direction=Direction.S2C,
+        size=22,  # confirmed — gap=22 (31 occurrences), 66=3x22, 88=4x22
+        description="Entity stat update (HP/MP/status)",
+        confirmed=True,
+    ),
+
+    0x540d: PacketDef(
+        opcode=0x540d,
+        name="ENTITY_ACTION",
+        direction=Direction.S2C,
+        size=8,  # confirmed — 80b = 8b + 72b(0x6d0c) coalesced
+        description="Entity action trigger",
+        confirmed=True,
+    ),
+
+    0x5c0c: PacketDef(
+        opcode=0x5c0c,
+        name="ENTITY_DATA",
+        direction=Direction.S2C,
+        size=None,  # variable: 9-1412b observed
+        description="Entity detailed data (variable length)",
+        confirmed=False,
+    ),
+
+    0x620c: PacketDef(
+        opcode=0x620c,
+        name="COMBAT_EFFECT",
+        direction=Direction.S2C,
+        size=None,  # variable: 24-168b observed
+        description="Combat effect / damage display data",
+        confirmed=False,
+    ),
+
+    0x660e: PacketDef(
+        opcode=0x660e,
+        name="NAME_LABEL",
+        direction=Direction.S2C,
+        size=None,  # variable: 25, 73b — contains ASCII character names
+        description="Name label for entity (contains readable character/NPC names)",
+        confirmed=False,
+    ),
+
+    0x6b0c: PacketDef(
+        opcode=0x6b0c,
+        name="ENTITY_MOVE_PATH",
+        direction=Direction.S2C,
+        size=None,  # variable: 60, 105b — contains position + path data
+        description="Entity movement path with waypoints",
+        confirmed=False,
+    ),
+
+    0x6c0c: PacketDef(
+        opcode=0x6c0c,
+        name="ENTITY_TICK",
+        direction=Direction.S2C,
+        size=11,  # confirmed — 33=3x11 coalesced (11b 6c0c + 11b 530d + noise)
+        description="Entity tick/heartbeat update",
+        confirmed=True,
+    ),
+
+    0x6d0c: PacketDef(
+        opcode=0x6d0c,
+        name="ENTITY_MOVE_DETAIL",
+        direction=Direction.S2C,
+        size=None,  # variable: 72, 160b — position + extended movement data
+        description="Detailed entity movement with coords and state",
+        confirmed=False,
+    ),
+
+    0x750c: PacketDef(
+        opcode=0x750c,
+        name="ENTITY_BATCH_MOVE",
+        direction=Direction.S2C,
+        size=52,  # confirmed — offset2 always=52, byte[52]=0x330e(EFFECT_DATA follows)
+        description="Entity batch movement update, often followed by EFFECT_DATA",
+        fields=[
+            FieldDef("length", 2, 2, "u16le", "Packet length (always 52)"),
+        ],
+        confirmed=True,
+    ),
+
+    0xd00e: PacketDef(
+        opcode=0xd00e,
+        name="SKILL_EFFECT",
+        direction=Direction.S2C,
+        size=50,  # confirmed — all 6 occurrences = 50b
+        description="Skill visual effect data",
+        confirmed=True,
+    ),
+
+    0x301e: PacketDef(
+        opcode=0x301e,
+        name="COMBAT_RESULT",
+        direction=Direction.S2C,
+        size=33,  # confirmed — all 2 occurrences = 33b
+        description="Combat result / damage summary",
+        confirmed=True,
+    ),
+
+    0x380c: PacketDef(
+        opcode=0x380c,
+        name="ZONE_DATA",
+        direction=Direction.S2C,
+        size=None,  # variable: 395-1412b — large zone/map data
+        description="Zone or map data payload (large, variable)",
+        confirmed=False,
+    ),
+
+    0x2f0c: PacketDef(
+        opcode=0x2f0c,
+        name="ENTITY_GROUP",
+        direction=Direction.S2C,
+        size=None,  # variable: 6-130b — compound packet embedding other opcodes
+        description="Entity group update — embeds child packets (0x6d0c, 0x750c, etc.)",
+        confirmed=False,
+    ),
+
+    0x1b15: PacketDef(
+        opcode=0x1b15,
+        name="INVENTORY_DATA",
+        direction=Direction.S2C,
+        size=None,  # variable: 127-1244b
+        description="Inventory or item data payload",
+        confirmed=False,
+    ),
+
+    0x0c15: PacketDef(
+        opcode=0x0c15,
+        name="CHARACTER_DATA",
+        direction=Direction.S2C,
+        size=None,  # variable: 44-306b
+        description="Character data payload",
         confirmed=False,
     ),
 
