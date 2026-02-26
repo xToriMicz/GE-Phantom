@@ -551,6 +551,21 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         confirmed=True,
     ),
 
+    0x5a0c: PacketDef(
+        opcode=0x5a0c,
+        name="ENTITY_STAT_HEADER",
+        direction=Direction.S2C,
+        size=10,  # confirmed — 11 instances: always 10b, followed by ENTITY_STAT
+        description="Entity stat update prefix — always pairs with ENTITY_STAT (0x530d)",
+        fields=[
+            FieldDef("entity_ref", 2, 2, "u16le", "Entity reference ID"),
+            FieldDef("zeros1", 4, 2, "bytes", "Always 0x0000"),
+            FieldDef("param", 6, 2, "u16le", "Parameter value"),
+            FieldDef("zeros2", 8, 2, "bytes", "Always 0x0000"),
+        ],
+        confirmed=True,
+    ),
+
     0x5411: PacketDef(
         opcode=0x5411,
         name="ENTITY_PROFILE",
