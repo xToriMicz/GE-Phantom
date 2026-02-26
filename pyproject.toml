@@ -5,6 +5,7 @@ description = "Granado Espada packet-based bot — Auto Pick Item first"
 requires-python = ">=3.11"
 dependencies = [
     "scapy>=2.5",
+    "textual>=0.40",
 ]
 
 [project.optional-dependencies]

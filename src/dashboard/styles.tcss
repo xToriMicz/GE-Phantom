@@ -1,0 +1,128 @@
+/* GE_Phantom Dashboard — Dark theme */
+
+Screen {
+    background: $surface;
+}
+
+/* Header bar */
+#header-bar {
+    dock: top;
+    height: 1;
+    background: $primary-background;
+    color: $text;
+    padding: 0 1;
+}
+
+#status-label {
+    width: 1fr;
+}
+
+#rate-label {
+    width: auto;
+    text-style: bold;
+    color: $success;
+}
+
+/* Tab content area */
+TabbedContent {
+    height: 1fr;
+}
+
+ContentSwitcher {
+    height: 1fr;
+}
+
+TabPane {
+    height: 1fr;
+    padding: 0;
+}
+
+/* Traffic panel */
+TrafficPanel {
+    height: 1fr;
+    border: solid $primary;
+}
+
+TrafficPanel RichLog {
+    height: 1fr;
+}
+
+#traffic-rate {
+    dock: top;
+    height: 1;
+    background: $panel;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+/* Entity panel */
+EntityPanel {
+    height: 1fr;
+}
+
+#entity-table {
+    height: 1fr;
+    border: solid $primary;
+}
+
+#char-detail {
+    dock: bottom;
+    height: 5;
+    border: solid $secondary;
+    padding: 0 1;
+    background: $panel;
+}
+
+/* Drop panel */
+DropPanel {
+    height: 1fr;
+}
+
+#drop-summary {
+    dock: top;
+    height: 1;
+    background: $panel;
+    padding: 0 1;
+    color: $warning;
+}
+
+#drop-table {
+    height: 1fr;
+    border: solid $warning;
+}
+
+/* Session panel */
+SessionPanel {
+    height: 1fr;
+    padding: 1;
+}
+
+SessionPanel Static {
+    height: 1fr;
+}
+
+/* Color accents for entity types */
+.type-monster {
+    color: $error;
+}
+
+.type-npc {
+    color: $primary;
+}
+
+.type-player {
+    color: $success;
+}
+
+.type-item {
+    color: $warning;
+}
+
+.type-object {
+    color: $text-muted;
+}
+
+/* Footer */
+Footer {
+    background: $primary-background;
+}
