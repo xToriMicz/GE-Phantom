@@ -119,10 +119,16 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         name="COMBAT_UPDATE",
         direction=Direction.S2C,
         size=38,  # confirmed fixed — 76=2x38, 63=38+25(EFFECT), 64=38+26(ENTITY_POS)
-        description="Combat update — contains attack range as float32",
+        description="Combat update — attack range + entity position + movement state",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
-            FieldDef("attack_range", 30, 4, "f32", "Attack range (e.g. 850.0, 803.0)"),
+            FieldDef("tick", 10, 4, "u32le", "Tick/sequence (range 5228-5392)"),
+            FieldDef("zone", 14, 4, "u32le", "Zone ID (range 215437-215440)"),
+            FieldDef("x", 18, 4, "i32le", "Entity X coordinate"),
+            FieldDef("y", 22, 4, "i32le", "Entity Y coordinate"),
+            FieldDef("state", 26, 4, "u32le", "Movement state (30=idle, 81=walk, 119=run)"),
+            FieldDef("attack_range", 30, 4, "f32", "Attack range (539-1000, per character class)"),
+            FieldDef("combat_flags", 34, 4, "u32le", "Combat flags (0, 2, or 4)"),
         ],
         confirmed=True,
     ),
@@ -132,9 +138,12 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         name="MONSTER_SPAWN",
         direction=Direction.S2C,
         size=371,  # confirmed fixed — 742=2x371 coalesced
-        description="Monster spawn with full data (type, level, position, stats)",
+        description="Monster spawn with position at offsets 15-22 (i32le x,y)",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("x", 15, 4, "i32le", "Spawn X coordinate (confirmed 100% match)"),
+            FieldDef("y", 19, 4, "i32le", "Spawn Y coordinate (confirmed 100% match)"),
+            FieldDef("spawn_state", 23, 2, "u16le", "Spawn state/flags"),
         ],
         confirmed=True,
     ),
@@ -143,10 +152,13 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x3f0c,
         name="ENTITY_SPAWN_B",
         direction=Direction.S2C,
-        size=371,  # confirmed — 8 instances across 2 captures, consistent 371b
-        description="Entity spawn group B (same 371b structure as MONSTER_SPAWN — not NPC-specific)",
+        size=371,  # confirmed — all instances 371b
+        description="Entity spawn group B (same position layout as MONSTER_SPAWN)",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("x", 15, 4, "i32le", "Spawn X coordinate"),
+            FieldDef("y", 19, 4, "i32le", "Spawn Y coordinate"),
+            FieldDef("spawn_state", 23, 2, "u16le", "Spawn state/flags"),
         ],
         confirmed=True,
     ),
@@ -155,10 +167,13 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x400c,
         name="OBJECT_SPAWN",
         direction=Direction.S2C,
-        size=371,  # confirmed — 742=2x371 coalesced, 9 instances across 2 captures
-        description="Object/structure spawn (similar to monster spawn)",
+        size=371,  # confirmed — 742=2x371 coalesced
+        description="Object/structure spawn (same position layout as MONSTER_SPAWN)",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("x", 15, 4, "i32le", "Spawn X coordinate"),
+            FieldDef("y", 19, 4, "i32le", "Spawn Y coordinate"),
+            FieldDef("spawn_state", 23, 2, "u16le", "Spawn state/flags"),
         ],
         confirmed=True,
     ),

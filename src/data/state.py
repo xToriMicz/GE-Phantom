@@ -306,7 +306,12 @@ class RadarState:
             "ENTITY_SPAWN_EX": "monster",
             "OBJECT_SPAWN": "object",
         }.get(spawn_type, "unknown")
-        self.entities[eid] = Entity(entity_id=eid, entity_type=etype, last_seen=ts)
+        # Extract spawn position (x@15, y@19 — confirmed 100% match via Phase 1 analysis)
+        x = d.get("x", 0)
+        y = d.get("y", 0)
+        self.entities[eid] = Entity(
+            entity_id=eid, entity_type=etype, x=x, y=y, last_seen=ts,
+        )
         self._notify("spawn", d)
 
     def _handle_combat(self, d: dict, ts: float) -> None:
@@ -314,16 +319,29 @@ class RadarState:
         if not eid:
             return
         attack_range = d.get("attack_range")
+        x = d.get("x")
+        y = d.get("y")
+        state = d.get("state")
+        zone = d.get("zone")
 
         if eid not in self.characters:
             self.characters[eid] = CharacterInfo(entity_id=eid)
         ci = self.characters[eid]
         if attack_range is not None:
             ci.attack_range = attack_range
+        if state is not None:
+            ci.state_flags = state
+        if zone is not None:
+            ci.zone = zone
 
-        # Also ensure entity exists
+        # Ensure entity exists and update position from COMBAT_UPDATE
         if eid not in self.entities:
             self.entities[eid] = Entity(entity_id=eid, last_seen=ts)
-        self.entities[eid].last_seen = ts
+        ent = self.entities[eid]
+        ent.last_seen = ts
+        if x is not None:
+            ent.x = x
+        if y is not None:
+            ent.y = y
 
         self._notify("combat", d)
