@@ -631,6 +631,220 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         length_field_includes_header=True,
     ),
 
+    # ---- Discovered from remaining unknowns analysis (2026-02-27) ----
+
+    0x520c: PacketDef(
+        opcode=0x520c,
+        name="PLAYER_NAME",
+        direction=Direction.S2C,
+        size=26,  # 1 instance, follows PLAYER_SPAWN — contains "CrusaderDaria"
+        description="Player name label — character name string after PLAYER_SPAWN",
+        fields=[
+            FieldDef("param", 2, 2, "u16le", "Parameter (0x019b)"),
+            FieldDef("ref_opcode", 4, 2, "u16be", "Embedded ref (0x0c15 CHARACTER_DATA)"),
+            FieldDef("zeros", 6, 2, "bytes", "Padding"),
+            FieldDef("name", 8, 13, "str", "Character name (null-terminated)"),
+            FieldDef("flags", 22, 1, "u8", "Name flags"),
+            FieldDef("suffix", 23, 3, "bytes", "Suffix data"),
+        ],
+        confirmed=False,
+    ),
+
+    0x1215: PacketDef(
+        opcode=0x1215,
+        name="SESSION_PARAM",
+        direction=Direction.S2C,
+        size=9,  # 1 instance — all zeros payload
+        description="Session/zone parameter (9 bytes, mostly zeros)",
+        confirmed=False,
+    ),
+
+    0xfbee: PacketDef(
+        opcode=0xfbee,
+        name="SYSTEM_BLOCK_A",
+        direction=Direction.S2C,
+        size=268,  # 1 instance — large static data, follows HEARTBEAT
+        description="System data block (268 bytes, sparse — similar structure to 0x6cf1)",
+        confirmed=False,
+    ),
+
+    0xbe14: PacketDef(
+        opcode=0xbe14,
+        name="ENTITY_DETAIL_B",
+        direction=Direction.S2C,
+        size=108,  # 1 instance — 3×36-byte sub-entries with sequential sub-opcodes (bf14, c014)
+        description="Entity detail batch — 36-byte entries with coords/speed, follows ENTITY_BATCH_MOVE",
+        fields=[
+            FieldDef("count_marker", 12, 2, "u16le", "Entry count marker (0x02)"),
+            FieldDef("speed", 20, 4, "f32", "Speed/range value (~9.08)"),
+            FieldDef("x", 24, 4, "i32le", "X coordinate"),
+            FieldDef("y", 28, 4, "i32le", "Y coordinate"),
+            FieldDef("state", 32, 4, "u32le", "Movement state"),
+        ],
+        confirmed=False,
+    ),
+
+    0x5a54: PacketDef(
+        opcode=0x5a54,
+        name="COMBAT_TRIGGER",
+        direction=Direction.S2C,
+        size=42,  # 1 instance — has coords, entity refs, state byte 0x77 (run)
+        description="Combat trigger with entity positions and action references",
+        fields=[
+            FieldDef("entity_ref", 2, 2, "u16le", "Entity reference"),
+            FieldDef("x", 10, 4, "i32le", "X coordinate (signed)"),
+            FieldDef("y", 14, 4, "i32le", "Y coordinate (signed)"),
+            FieldDef("state", 18, 1, "u8", "Movement state (0x77=run)"),
+            FieldDef("entity_id", 22, 4, "u32le", "Entity ID"),
+        ],
+        confirmed=False,
+    ),
+
+    0xba14: PacketDef(
+        opcode=0xba14,
+        name="ENTITY_NOTIFY",
+        direction=Direction.S2C,
+        size=21,  # 1 instance — 0xxx14 entity family, follows HEARTBEAT
+        description="Entity notification — small entity update (21 bytes)",
+        fields=[
+            FieldDef("zeros", 2, 6, "bytes", "Padding (6 zero bytes)"),
+            FieldDef("value", 8, 4, "u32le", "Notification value"),
+        ],
+        confirmed=False,
+    ),
+
+    0xf0b7: PacketDef(
+        opcode=0xf0b7,
+        name="SYSTEM_ECHO",
+        direction=Direction.S2C,
+        size=13,  # 1 instance — b[0:4] == b[8:12] repeating pattern
+        description="System echo — 4-byte header pattern repeats at offset 8",
+        confirmed=False,
+    ),
+
+    0x8114: PacketDef(
+        opcode=0x8114,
+        name="ENTITY_MARKER",
+        direction=Direction.S2C,
+        size=13,  # 1 instance — 0xxx14 entity family, follows HEARTBEAT
+        description="Entity marker/config (13 bytes, 0xxx14 family)",
+        fields=[
+            FieldDef("zeros", 2, 6, "bytes", "Padding"),
+            FieldDef("value", 8, 4, "u32le", "Marker value"),
+        ],
+        confirmed=False,
+    ),
+
+    0x005b: PacketDef(
+        opcode=0x005b,
+        name="PLAYER_FULL_DATA",
+        direction=Direction.S2C,
+        size=708,  # 1 instance — massive player data, follows PLAYER_ACTION
+        description="Full player data payload (708 bytes — stats, inventory, etc.)",
+        confirmed=False,
+    ),
+
+    0x6cf1: PacketDef(
+        opcode=0x6cf1,
+        name="SYSTEM_BLOCK_B",
+        direction=Direction.S2C,
+        size=268,  # 1 instance — same size as SYSTEM_BLOCK_A (0xfbee), similar structure
+        description="System data block B (268 bytes, sparse — 0xxxf1 family)",
+        confirmed=False,
+    ),
+
+    0xaef1: PacketDef(
+        opcode=0xaef1,
+        name="ENTITY_EFFECT_EX",
+        direction=Direction.S2C,
+        size=36,  # 1 instance — has coords, entity refs, 0xxxf1 family
+        description="Extended entity effect — coordinates and entity references",
+        fields=[
+            FieldDef("zeros", 2, 6, "bytes", "Padding"),
+            FieldDef("entity_ref", 8, 4, "u32le", "Entity reference"),
+            FieldDef("param", 12, 4, "u32le", "Effect parameter"),
+            FieldDef("x", 16, 4, "i32le", "X coordinate"),
+            FieldDef("y", 20, 4, "i32le", "Y coordinate"),
+            FieldDef("state", 24, 4, "u32le", "State/flags"),
+            FieldDef("magnitude", 28, 4, "f32", "Effect magnitude"),
+        ],
+        confirmed=False,
+    ),
+
+    # NOTE: 0x0054 and 0x0018 appear as 17b residuals after ENTITY_DETAIL
+    # sub-entries are split by 0x8114 boundary. NOT registered because `00 xx`
+    # opcodes cause false positive boundary matches in the scanner (00 is too
+    # common in binary data). These are sub-entry tails, not independent opcodes.
+
+    0x010a: PacketDef(
+        opcode=0x010a,
+        name="PLAYER_IDENTITY",
+        direction=Direction.S2C,
+        size=406,  # 1 instance — rich player profile: name + clan + skill
+        description="Player identity — char name, clan, active skill ('Lady Rachel', 'Good Night', 'ExCeLlence')",
+        fields=[
+            FieldDef("header", 2, 3, "bytes", "Header params"),
+            FieldDef("char_name", 5, 11, "str", "Character name (null-term, may contain 0xa0)"),
+            FieldDef("clan_name", 37, 10, "str", "Clan/family name (null-term)"),
+            FieldDef("skill_delim_start", 48, 2, "bytes", "Skill name start delimiter (0x2d 0xf0)"),
+            FieldDef("skill_name", 50, 10, "str", "Active skill name ('ExCeLlence')"),
+            FieldDef("skill_delim_end", 60, 2, "bytes", "Skill name end delimiter (0xf0 0x2d)"),
+        ],
+        confirmed=False,
+    ),
+
+    # ---- Variable-size unknowns (boundary-scanned framing) ----
+
+    0x1900: PacketDef(
+        opcode=0x1900,
+        name="SERVER_RESPONSE",
+        direction=Direction.S2C,
+        size=None,  # variable: 11b, 22b — always follows ACK
+        description="Server response/confirmation after ACK (variable, 2 instances in session5)",
+        confirmed=False,
+    ),
+
+    0xd20d: PacketDef(
+        opcode=0xd20d,
+        name="ZONE_TRAILER",
+        direction=Direction.S2C,
+        size=None,  # variable: 4b, 8b — always follows ZONE_DATA
+        description="Zone data trailer — small variable packet after ZONE_DATA",
+        confirmed=False,
+    ),
+
+    0x8214: PacketDef(
+        opcode=0x8214,
+        name="ENTITY_DETAIL_A",
+        direction=Direction.S2C,
+        size=None,  # variable: 92b, 108b — 36-byte sub-entries, follows ENTITY_BATCH_MOVE
+        description="Entity detail batch A — 36-byte sub-entries with sequential sub-opcodes",
+        fields=[
+            FieldDef("count_marker", 12, 2, "u16le", "Entry count marker (0x02)"),
+            FieldDef("speed", 20, 4, "f32", "Speed/range value (~10.42)"),
+            FieldDef("x", 24, 4, "i32le", "X coordinate"),
+            FieldDef("y", 28, 4, "i32le", "Y coordinate"),
+            FieldDef("state", 32, 4, "u32le", "Movement state"),
+        ],
+        confirmed=False,
+    ),
+
+    0x7400: PacketDef(
+        opcode=0x7400,
+        name="SKILL_EFFECT_NAME",
+        direction=Direction.S2C,
+        size=None,  # variable: 35b, 387b — contains "ExCeLlence" with f0-delimiters
+        description="Skill effect with name — delimited ASCII skill name (e.g. ExCeLlence)",
+        fields=[
+            FieldDef("delim_start", 2, 2, "bytes", "Start delimiter (0x2d 0xf0)"),
+            FieldDef("skill_name", 4, 10, "str", "Skill name (e.g. 'ExCeLlence')"),
+            FieldDef("delim_end", 14, 2, "bytes", "End delimiter (0xf0 0x2d)"),
+            FieldDef("null", 16, 1, "u8", "Null separator"),
+            FieldDef("param_f32", 17, 4, "f32", "Skill parameter (f32, e.g. 58.0)"),
+        ],
+        confirmed=False,
+    ),
+
     # ---- C2S: Client → Server (encrypted — opcode readable, payload not) ----
 
     0x1000: PacketDef(
