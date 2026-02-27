@@ -12,6 +12,7 @@ captures/*.json
 .env
 *.PNG
 *.png
+archive/
 # Generated analysis artifacts
 _matches.pkl
 *.pkl

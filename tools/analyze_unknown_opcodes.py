@@ -1,9 +1,10 @@
 """Analyze top unknown opcodes to determine framing and register them.
 
-Targets from last session's coverage report:
-  0x5a0c (11x) — likely entity/combat packet (0xXX0c pattern)
-  0x0064 (6x)  — unusual opcode range, investigate
-  0x7b0c (3x)  — entity-related (0xXX0c pattern)
+Targets from coverage plan (0x5a0c, 0x0064, 0x7b0c already registered):
+  0xd20d — new candidate, needs framing analysis
+  0x5f0c — entity-related (0xXX0c pattern)
+  0x8214 — investigate framing
+  0x630c — entity-related (0xXX0c pattern)
 
 Strategy:
   1. Find all instances in raw TCP segments
@@ -25,7 +26,7 @@ from src.protocol.packet_types import KNOWN_PACKETS, get_packet_size, HEADER_SIZ
 CAPTURES_DIR = Path(__file__).parent.parent / "captures"
 
 # Target unknown opcodes
-UNKNOWN_TARGETS = [0x5a0c, 0x0064, 0x7b0c]
+UNKNOWN_TARGETS = [0xd20d, 0x5f0c, 0x8214, 0x630c]
 
 # Also scan for any other unknowns
 SCAN_ALL_UNKNOWNS = True

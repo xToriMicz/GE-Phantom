@@ -579,6 +579,58 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         confirmed=True,
     ),
 
+    0x5f0c: PacketDef(
+        opcode=0x5f0c,
+        name="ENTITY_LINK",
+        direction=Direction.S2C,
+        size=24,  # confirmed — boundary deduced: chain=[ENTITY_BATCH_MOVE@24]
+        description="Entity link/association (entity family, 24 bytes)",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+        ],
+        confirmed=True,
+    ),
+
+    0x630c: PacketDef(
+        opcode=0x630c,
+        name="ENTITY_SYNC",
+        direction=Direction.S2C,
+        size=14,  # confirmed — solo segment exactly 14 bytes
+        description="Entity sync/update (entity family, 14 bytes)",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+        ],
+        confirmed=True,
+    ),
+
+    0x580c: PacketDef(
+        opcode=0x580c,
+        name="ENTITY_LABEL",
+        direction=Direction.S2C,
+        size=None,  # variable — contains null-terminated character names
+        description="Entity name/label (contains character name string, possibly Thai)",
+        confirmed=True,
+        length_field_offset=2,  # b[2:4] u16le = total packet size (verified: 26=26)
+        length_field_includes_header=True,
+    ),
+
+    0xca0c: PacketDef(
+        opcode=0xca0c,
+        name="SKILL_CAST",
+        direction=Direction.S2C,
+        size=None,  # variable — contains null-terminated skill names
+        description="Skill cast with position and skill name (e.g. SKl_Resuscitation)",
+        fields=[
+            FieldDef("x", 4, 4, "i32le", "X coordinate"),
+            FieldDef("y", 8, 4, "i32le", "Y coordinate"),
+            FieldDef("param", 12, 4, "u32le", "Skill parameter"),
+            FieldDef("skill_name", 16, 18, "str", "Skill name (null-terminated)"),
+        ],
+        confirmed=True,
+        length_field_offset=2,  # b[2:4] u16le = total packet size (verified: 34=34, 3x coalesced)
+        length_field_includes_header=True,
+    ),
+
     # ---- C2S: Client → Server (encrypted — opcode readable, payload not) ----
 
     0x1000: PacketDef(
