@@ -97,7 +97,7 @@
 #define CMD_GET_PROP            0x02   /* GetPropertyNumber(param1=idSpace, str=propName) */
 #define CMD_SET_PROP            0x03   /* SetPropertyNumber(param1=idSpace, str=propName, f64=value) */
 #define CMD_READ_ADDR           0x10   /* Read 4 bytes from param1 address → result_i32 */
-#define CMD_SET_FUNC_ADDR       0x11   /* Set function addr: param1=addr, param2=0=get/1=set */
+#define CMD_SET_FUNC_ADDR       0x11   /* Set function addr: param1=addr, param2=0=get/1=set/2=update */
 #define CMD_FIND_STRING         0x12   /* Find string in .rdata: str_param=needle → result_i32=addr */
 #define CMD_HOOK_GETPROP        0x20   /* Install logging hook on GetPropertyNumber */
 #define CMD_UNHOOK_GETPROP      0x21   /* Remove logging hook */
@@ -109,7 +109,11 @@
 #define CMD_SET_VTGET_OVERRIDE  0x33   /* Set override value for vtable GET (f64), param1=0 off/1 on */
 #define CMD_VTGET_STATUS        0x34   /* Read hook stats → result_i32=count, f64=last_value, str=info */
 #define CMD_CHAT                0x40   /* Chat(str_param) → sends to server + local display */
+                                       /* ⚠ UNSAFE: causes server disconnect! Requires param1=0xCAFE to confirm */
 #define CMD_SYSMSG              0x41   /* SysMsg(str_param) → local system message display */
+#define CMD_UPDATE_ITEM_TABLE   0x42   /* UpdateItemTable() → flush IES cache (main thread) */
+#define CMD_DUMP_MEM            0x50   /* Dump N bytes: param1=addr, param2=count(max 96) → str_result as hex */
+#define CMD_SCAN_XREF_STR      0x51   /* Find string in .rdata, then scan .text for xrefs → str_result */
 #define CMD_PING                0xFE   /* Ping → status=done, result_i32=0xDEADBEEF */
 
 /* Status codes (written by DLL to offset 0x01) */
@@ -153,6 +157,7 @@ typedef double (__cdecl *fn_GetPropertyNumber)(const char *objName, int idSpace,
 typedef void   (__cdecl *fn_SetPropertyNumber)(const char *objName, int idSpace, const char *propName, double value);
 typedef void   (__cdecl *fn_ChatInternal)(const char *text);
 typedef void   (__cdecl *fn_SysMsgInternal)(const char *text);
+typedef void   (__cdecl *fn_UpdateItemTable)(void);
 
 /* ─── Phase 3: VTable Call Sites (from xref scan) ────────── */
 

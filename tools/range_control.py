@@ -59,8 +59,11 @@ CMD_HOOK_VTABLE_GET     = 0x31
 CMD_UNHOOK_VTABLE_GET   = 0x32
 CMD_SET_VTGET_OVERRIDE  = 0x33
 CMD_VTGET_STATUS        = 0x34
-CMD_CHAT            = 0x40
+CMD_CHAT            = 0x40   # ⚠ UNSAFE: causes disconnect! Requires param1=0xCAFE
 CMD_SYSMSG          = 0x41
+CMD_UPDATE_ITEM_TABLE = 0x42
+CMD_DUMP_MEM        = 0x50
+CMD_SCAN_XREF_STR   = 0x51
 CMD_PING            = 0xFE
 
 # Status
@@ -336,8 +339,12 @@ class PhantomCmd:
 
     # ── Phase 4: Chat / SysMsg ────────────────────────────────
 
-    def chat(self, message: str) -> bool:
-        """Send a chat message via Chat_internal (sends to server + local display)."""
+    def chat(self, message: str, confirm: bool = False) -> bool:
+        """Send a chat message via Chat_internal.
+        ⚠ UNSAFE: causes server disconnect! Requires confirm=True."""
+        if not confirm:
+            return False
+        self._write_u32(OFF_PARAM1, 0xCAFE)  # safety confirmation code
         self._write_str(OFF_STR_PARAM, message)
         status = self._send_cmd(CMD_CHAT)
         return status == STATUS_DONE
@@ -347,6 +354,43 @@ class PhantomCmd:
         self._write_str(OFF_STR_PARAM, message)
         status = self._send_cmd(CMD_SYSMSG)
         return status == STATUS_DONE
+
+    def update_item_table(self) -> bool:
+        """Call UpdateItemTable() to flush IES cache. Must set address first via set_func_addr(2, addr)."""
+        status = self._send_cmd(CMD_UPDATE_ITEM_TABLE)
+        return status == STATUS_DONE
+
+    def dump_mem(self, address: int, count: int = 32) -> str | None:
+        """Dump N bytes from address as hex string."""
+        self._write_u32(OFF_PARAM1, address)
+        self._write_u32(OFF_PARAM2, count)
+        status = self._send_cmd(CMD_DUMP_MEM)
+        if status == STATUS_DONE:
+            return self._read_str(OFF_STR_RESULT)
+        return None
+
+    def scan_xref_str(self, name: str) -> dict | None:
+        """Find string in .rdata and scan .text for xrefs.
+        Returns dict with string_addr, first_xref, first_callback, info."""
+        self._write_str(OFF_STR_PARAM, name)
+        status = self._send_cmd(CMD_SCAN_XREF_STR, timeout=30.0)
+        if status == STATUS_DONE:
+            return {
+                "string_addr": self._read_u32(OFF_RESULT_I32),
+                "first_xref": self._read_u32(OFF_PARAM1),
+                "first_callback": self._read_u32(OFF_PARAM2),
+                "info": self._read_str(OFF_STR_RESULT),
+            }
+        return None
+
+    def sysmsg_prop(self, prop_name: str, id_space: int = 0,
+                    obj_name: str = "") -> bool:
+        """Debug helper: read a property and display its value via SysMsg."""
+        val = self.get_property(prop_name, id_space, obj_name)
+        if val is not None:
+            msg = f"{prop_name}={val:.2f}"
+            return self.sysmsg(msg)
+        return self.sysmsg(f"{prop_name}=ERROR")
 
 
 # ── CLI Commands ──────────────────────────────────────────────
@@ -417,8 +461,9 @@ def cmd_read(args):
 
 
 def cmd_setaddr(args):
-    which = 0 if args.which == "get" else 1
-    name = "GetPropertyNumber" if which == 0 else "SetPropertyNumber"
+    which = {"get": 0, "set": 1, "update": 2}[args.which]
+    names = {0: "GetPropertyNumber", 1: "SetPropertyNumber", 2: "UpdateItemTable"}
+    name = names[which]
     addr_str = args.address
     addr = int(addr_str, 16) if addr_str.startswith("0x") else int(addr_str)
 
@@ -475,8 +520,7 @@ def cmd_interactive(args):
     print("  get <prop> [id] [obj] — Get property value")
     print("  set <prop> <val> [id] [obj] — Set property value")
     print("  read <hex_addr>      — Read 4 bytes from address")
-    print("  setaddr get <hex>    — Set GetPropertyNumber address")
-    print("  setaddr set <hex>    — Set SetPropertyNumber address")
+    print("  setaddr get|set|update <hex> — Set function address")
     print("  find <string> [start_hex] — Find string in memory")
     print("  probe [id] [obj]     — Probe all known range properties")
     print("  hook                 — Hook GetPropertyNumber (log all game calls)")
@@ -484,8 +528,14 @@ def cmd_interactive(args):
     print("  hookset              — Hook SetPropertyNumber (log all game calls)")
     print("  unhookset            — Remove SetPropertyNumber hook")
     print("  --- Phase 4: Chat/SysMsg ---")
-    print("  chat <message>           — Send chat message (server + local)")
+    print("  chat <message>           — Send chat (⚠ UNSAFE: disconnects!)")
+    print("  chat! <message>          — Send chat with confirmation")
     print("  sysmsg <message>         — Display local system message")
+    print("  --- Phase 5: Investigation ---")
+    print("  dump <hex_addr> [count]  — Dump N bytes as hex (for disassembly)")
+    print("  findxref <string>        — Find string + scan xrefs in .text")
+    print("  updateitem               — Call UpdateItemTable() (set addr first!)")
+    print("  debugprop <prop> [id]    — Get property + show via SysMsg in-game")
     print("  --- Phase 3: VTable ---")
     print("  spy                  — One-shot vtable spy at xref #1 (getter)")
     print("  spy2                 — One-shot vtable spy at xref #2 (SETTER site)")
@@ -584,7 +634,7 @@ def cmd_interactive(args):
 
             elif verb == "setaddr":
                 if len(parts) < 3:
-                    print("Usage: setaddr get|set <hex_address>")
+                    print("Usage: setaddr get|set|update <hex_address>")
                     continue
                 which_str = parts[1].lower()
                 addr_str = parts[2]
@@ -593,10 +643,13 @@ def cmd_interactive(args):
                     which = 0
                 elif which_str == "set":
                     which = 1
+                elif which_str == "update":
+                    which = 2
                 else:
-                    print("Usage: setaddr get|set <hex_address>")
+                    print("Usage: setaddr get|set|update <hex_address>")
                     continue
-                name = "GetPropertyNumber" if which == 0 else "SetPropertyNumber"
+                names = {0: "GetPropertyNumber", 1: "SetPropertyNumber", 2: "UpdateItemTable"}
+                name = names[which]
                 if cmd.set_func_addr(which, addr):
                     print(f"  {name} = 0x{addr:08X}")
                 else:
@@ -644,11 +697,21 @@ def cmd_interactive(args):
 
             elif verb == "chat":
                 if len(parts) < 2:
-                    print("Usage: chat <message>")
+                    print("Usage: chat <message>  (⚠ blocked by default)")
+                    print("       chat! <message> (sends with confirmation)")
                     continue
                 message = " ".join(parts[1:])
-                print(f"[*] Chat: \"{message}\"")
-                if cmd.chat(message):
+                print(f"[!] Chat is DISABLED (causes server disconnect)")
+                print(f"    Use 'chat! {message}' to force-send with confirmation")
+
+            elif verb == "chat!":
+                if len(parts) < 2:
+                    print("Usage: chat! <message>")
+                    continue
+                message = " ".join(parts[1:])
+                print(f"[*] Chat (CONFIRMED): \"{message}\"")
+                print(f"    ⚠ This WILL send to server and may cause disconnect!")
+                if cmd.chat(message, confirm=True):
                     print("[+] Chat sent")
                 else:
                     print("[!] Chat failed")
@@ -663,6 +726,68 @@ def cmd_interactive(args):
                     print("[+] SysMsg displayed")
                 else:
                     print("[!] SysMsg failed")
+
+            # ── Phase 5: Investigation commands ───────────────
+
+            elif verb == "dump":
+                if len(parts) < 2:
+                    print("Usage: dump <hex_addr> [count]")
+                    continue
+                addr_str = parts[1]
+                addr = int(addr_str, 16) if addr_str.startswith("0x") else int(addr_str)
+                count = int(parts[2]) if len(parts) > 2 else 32
+                hex_str = cmd.dump_mem(addr, count)
+                if hex_str:
+                    print(f"  [0x{addr:08X}] {hex_str}")
+                    # Also attempt basic x86 disassembly hint for common prologue
+                    clean = hex_str.replace(" ", "")
+                    if clean.startswith("558BEC"):
+                        print(f"    ^ push ebp; mov ebp, esp (standard function prologue)")
+                else:
+                    print(f"  (error reading 0x{addr:08X})")
+
+            elif verb == "findxref":
+                if len(parts) < 2:
+                    print("Usage: findxref <string>  (e.g., findxref UpdateItemTable)")
+                    continue
+                name = parts[1]
+                print(f"[*] Scanning for \"{name}\" in .rdata + xrefs in .text...")
+                result = cmd.scan_xref_str(name)
+                if result:
+                    print(f"[+] {result['info']}")
+                    print(f"    String addr:    0x{result['string_addr']:08X}")
+                    if result['first_xref']:
+                        print(f"    First xref:     0x{result['first_xref']:08X}")
+                    if result['first_callback']:
+                        print(f"    First callback: 0x{result['first_callback']:08X}")
+                        print(f"    → Use 'setaddr update 0x{result['first_callback']:08X}' to set as UpdateItemTable")
+                else:
+                    print(f"[!] \"{name}\" not found or no xrefs")
+
+            elif verb == "updateitem":
+                print("[*] Calling UpdateItemTable()...")
+                if cmd.update_item_table():
+                    print("[+] UpdateItemTable OK — IES cache flushed")
+                else:
+                    print("[!] Failed (is the address set? Use 'findxref UpdateItemTable' first)")
+
+            elif verb == "debugprop":
+                if len(parts) < 2:
+                    print("Usage: debugprop <prop> [id_space] [obj]")
+                    continue
+                prop = parts[1]
+                id_s = int(parts[2]) if len(parts) > 2 else 0
+                obj = parts[3] if len(parts) > 3 else ""
+                val = cmd.get_property(prop, id_s, obj)
+                if val is not None:
+                    print(f"  {prop} = {val}")
+                    msg = f"{prop}={val:.2f}"
+                    if cmd.sysmsg(msg):
+                        print(f"  → displayed in-game: \"{msg}\"")
+                    else:
+                        print(f"  → SysMsg failed")
+                else:
+                    print(f"  (error reading {prop})")
 
             # ── Phase 3: VTable commands ──────────────────────
 
@@ -783,8 +908,8 @@ def main():
 
     # setaddr
     p_setaddr = sub.add_parser("setaddr", help="Set function address in DLL")
-    p_setaddr.add_argument("which", choices=["get", "set"],
-                           help="Which function: get=GetPropertyNumber, set=SetPropertyNumber")
+    p_setaddr.add_argument("which", choices=["get", "set", "update"],
+                           help="Which function: get=GetPropNum, set=SetPropNum, update=UpdateItemTable")
     p_setaddr.add_argument("address", help="Function address (hex with 0x prefix)")
     p_setaddr.set_defaults(func=cmd_setaddr)
 

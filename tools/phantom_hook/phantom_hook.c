@@ -125,6 +125,9 @@ static fn_SetPropertyNumber g_fn_set_prop = NULL;
 static fn_ChatInternal  g_fn_chat   = (fn_ChatInternal)GE_FUNC_CHAT_INTERNAL;
 static fn_SysMsgInternal g_fn_sysmsg = (fn_SysMsgInternal)GE_FUNC_SYSMSG_INTERNAL;
 
+/* UpdateItemTable — address resolved dynamically via CMD_SET_FUNC_ADDR (which=2) */
+static fn_UpdateItemTable g_fn_update_item_table = NULL;
+
 /* Flag: pending game-thread command (GET_PROP/SET_PROP must run on main thread) */
 static volatile BYTE g_mainthread_cmd = CMD_NOP;
 
@@ -374,8 +377,19 @@ static void try_execute_mainthread_cmd(void)
 
     case CMD_CHAT:
     {
+        DWORD confirm = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
         char text[64];
         BYTE first_bytes[8];
+
+        /* Safety guard: Chat causes server disconnect! Require confirmation code. */
+        if (confirm != 0xCAFE) {
+            log_write("MAIN_THREAD CMD: CHAT BLOCKED — requires param1=0xCAFE (got 0x%08X)", confirm);
+            log_write("  Chat at 0x%08X is UNSAFE (causes disconnect). Use confirm code to override.",
+                (DWORD)(DWORD_PTR)g_fn_chat);
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+            break;
+        }
+
         memcpy(text, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
         text[63] = '\0';
 
@@ -387,7 +401,7 @@ static void try_execute_mainthread_cmd(void)
             first_bytes[4], first_bytes[5], first_bytes[6], first_bytes[7]);
 
         __try {
-            log_write("  calling g_fn_chat...");
+            log_write("  calling g_fn_chat (CONFIRMED)...");
             g_fn_chat(text);
             log_write("  -> CHAT OK (returned)");
             mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
@@ -421,6 +435,36 @@ static void try_execute_mainthread_cmd(void)
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
             log_write("  -> SYSMSG EXCEPTION 0x%08X!", GetExceptionCode());
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+        }
+        break;
+    }
+
+    case CMD_UPDATE_ITEM_TABLE:
+    {
+        if (!g_fn_update_item_table) {
+            log_write("MAIN_THREAD CMD: UPDATE_ITEM_TABLE — function not resolved! Use setaddr update <addr>");
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+            break;
+        }
+
+        log_write("MAIN_THREAD CMD: UPDATE_ITEM_TABLE fn=0x%08X",
+            (DWORD)(DWORD_PTR)g_fn_update_item_table);
+
+        __try {
+            DWORD tick_before = GetTickCount();
+            DWORD tick_after;
+
+            g_fn_update_item_table();
+
+            tick_after = GetTickCount();
+            log_write("  -> UPDATE_ITEM_TABLE OK (took %u ms)", tick_after - tick_before);
+
+            *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = tick_after - tick_before;
+            mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            log_write("  -> UPDATE_ITEM_TABLE EXCEPTION 0x%08X!", GetExceptionCode());
             mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
         }
         break;
@@ -1588,12 +1632,15 @@ static void process_command(void)
     case CMD_SET_PROP:
     case CMD_CHAT:
     case CMD_SYSMSG:
+    case CMD_UPDATE_ITEM_TABLE:
         /* These must run on the main game thread (via hooked_send/recv).
          * Signal the main thread and leave the command in shared memory. */
         log_write("CMD: %s → deferred to main thread",
-            cmd == CMD_GET_PROP ? "GET_PROP" :
-            cmd == CMD_SET_PROP ? "SET_PROP" :
-            cmd == CMD_CHAT     ? "CHAT"     : "SYSMSG");
+            cmd == CMD_GET_PROP         ? "GET_PROP" :
+            cmd == CMD_SET_PROP         ? "SET_PROP" :
+            cmd == CMD_CHAT             ? "CHAT"     :
+            cmd == CMD_SYSMSG           ? "SYSMSG"   :
+            cmd == CMD_UPDATE_ITEM_TABLE ? "UPDATE_ITEM_TABLE" : "?");
         g_mainthread_cmd = cmd;
         /* Don't clear CMD_OFF_COMMAND — main thread will handle it */
         return;
@@ -1628,6 +1675,9 @@ static void process_command(void)
         } else if (which == 1) {
             g_fn_set_prop = (fn_SetPropertyNumber)addr;
             log_write("  → SetPropertyNumber = 0x%08X", addr);
+        } else if (which == 2) {
+            g_fn_update_item_table = (fn_UpdateItemTable)addr;
+            log_write("  → UpdateItemTable = 0x%08X", addr);
         } else {
             log_write("  → unknown which=%u", which);
             mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
@@ -1865,6 +1915,148 @@ static void process_command(void)
             memcpy((void *)(mem + CMD_OFF_STR_RESULT), result, strlen(result) + 1);
         }
         mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+    }
+
+    /* ── Phase 5: Memory Dump & Xref Scanner ─────────────── */
+
+    case CMD_DUMP_MEM:
+    {
+        DWORD addr = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
+        DWORD count = *(volatile DWORD *)(mem + CMD_OFF_PARAM2);
+        char hex_buf[96];
+        int i, pos = 0;
+
+        if (count == 0) count = 32;    /* default: 32 bytes */
+        if (count > 44) count = 44;    /* max: 44 bytes (88 hex chars + 7 spaces = 95 < 96) */
+
+        log_write("CMD: DUMP_MEM addr=0x%08X count=%u", addr, count);
+
+        __try {
+            BYTE *src = (BYTE *)addr;
+            for (i = 0; i < (int)count && pos < 94; i++) {
+                if (i > 0 && (i % 8) == 0) {
+                    hex_buf[pos++] = ' ';
+                }
+                pos += sprintf(hex_buf + pos, "%02X", src[i]);
+            }
+            hex_buf[pos] = '\0';
+
+            log_write("  [0x%08X] %s", addr, hex_buf);
+
+            memcpy((void *)(mem + CMD_OFF_STR_RESULT), hex_buf, pos + 1);
+            *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = count;
+            mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            log_write("  → ACCESS VIOLATION at 0x%08X!", addr);
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+        }
+        break;
+    }
+
+    case CMD_SCAN_XREF_STR:
+    {
+        char needle[64];
+        BYTE addr_needle[4];
+        BYTE *text_start = (BYTE *)GE_TEXT_START;
+        DWORD text_size  = GE_TEXT_END - GE_TEXT_START;
+        DWORD string_addr = 0;
+        BYTE *p;
+        int needle_len;
+        int xref_count = 0;
+        char result_buf[96];
+        int rpos = 0;
+
+        memcpy(needle, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
+        needle[63] = '\0';
+        needle_len = (int)strlen(needle);
+
+        log_write("CMD: SCAN_XREF_STR \"%s\"", needle);
+
+        /* Step 1: Find string in .rdata */
+        {
+            BYTE *search_start = (BYTE *)GE_RDATA_BASE;
+            BYTE *search_end   = (BYTE *)0x00C50000;
+
+            for (p = search_start; p < search_end - needle_len; p++) {
+                if (memcmp(p, needle, needle_len + 1) == 0) {  /* +1 to match null terminator */
+                    string_addr = (DWORD)(DWORD_PTR)p;
+                    log_write("  string \"%s\" found at 0x%08X", needle, string_addr);
+                    break;
+                }
+            }
+        }
+
+        if (!string_addr) {
+            log_write("  string \"%s\" NOT FOUND in .rdata", needle);
+            sprintf(result_buf, "string not found");
+            memcpy((void *)(mem + CMD_OFF_STR_RESULT), result_buf, strlen(result_buf) + 1);
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+            break;
+        }
+
+        /* Step 2: Build LE needle from string address */
+        addr_needle[0] = (BYTE)(string_addr & 0xFF);
+        addr_needle[1] = (BYTE)((string_addr >> 8) & 0xFF);
+        addr_needle[2] = (BYTE)((string_addr >> 16) & 0xFF);
+        addr_needle[3] = (BYTE)((string_addr >> 24) & 0xFF);
+
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = string_addr;
+
+        /* Step 3: Scan .text for xrefs */
+        {
+            DWORD first_xref = 0;
+            DWORD first_callback = 0;
+            DWORD i;
+
+            for (i = 0; i < text_size - 4; i++) {
+                if (text_start[i]   == addr_needle[0] &&
+                    text_start[i+1] == addr_needle[1] &&
+                    text_start[i+2] == addr_needle[2] &&
+                    text_start[i+3] == addr_needle[3])
+                {
+                    DWORD xref_addr = GE_TEXT_START + i;
+                    xref_count++;
+
+                    /* Check if it's a PUSH imm32 (tolua registration pattern) */
+                    if (i >= 1 && text_start[i-1] == 0x68) {
+                        log_write("  XREF #%d: PUSH 0x%08X at 0x%08X",
+                            xref_count, string_addr, xref_addr - 1);
+
+                        if (!first_xref) first_xref = xref_addr - 1;
+
+                        /* Check for preceding PUSH (callback address in tolua pattern):
+                         * PUSH callback ; PUSH "FuncName" ; CALL register_func */
+                        if (i >= 6 && text_start[i-6] == 0x68) {
+                            DWORD callback = *(DWORD *)(text_start + i - 5);
+                            log_write("    prev PUSH: 0x%08X (probable callback)", callback);
+                            if (!first_callback) first_callback = callback;
+                        }
+                    } else {
+                        const char *insn = decode_instruction_type(text_start, i);
+                        log_write("  XREF #%d: %s at 0x%08X", xref_count, insn, xref_addr);
+                        if (!first_xref) first_xref = xref_addr;
+                    }
+                }
+            }
+
+            log_write("  total xrefs for \"%s\": %d", needle, xref_count);
+
+            /* Write results */
+            *(volatile DWORD *)(mem + CMD_OFF_PARAM1) = first_xref;
+            *(volatile DWORD *)(mem + CMD_OFF_PARAM2) = first_callback;
+
+            rpos = sprintf(result_buf, "str=0x%08X xrefs=%d", string_addr, xref_count);
+            if (first_xref)
+                rpos += sprintf(result_buf + rpos, " xref1=0x%08X", first_xref);
+            if (first_callback)
+                rpos += sprintf(result_buf + rpos, " cb=0x%08X", first_callback);
+
+            memcpy((void *)(mem + CMD_OFF_STR_RESULT), result_buf, rpos + 1);
+        }
+
+        mem[CMD_OFF_STATUS] = (xref_count > 0) ? CMD_STATUS_DONE : CMD_STATUS_ERROR;
         break;
     }
 
