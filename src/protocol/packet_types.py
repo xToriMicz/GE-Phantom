@@ -143,12 +143,12 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x3f0c,
         name="NPC_SPAWN",
         direction=Direction.S2C,
-        size=371,
+        size=371,  # confirmed — 8 instances across 2 captures, consistent 371b
         description="NPC spawn (similar structure to monster spawn)",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
         ],
-        confirmed=False,
+        confirmed=True,
     ),
 
     0x400c: PacketDef(
@@ -741,7 +741,7 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         direction=Direction.S2C,
         size=708,  # 1 instance — massive player data, follows PLAYER_ACTION
         description="Full player data payload (708 bytes — stats, inventory, etc.)",
-        confirmed=False,
+        confirmed=True,
     ),
 
     0x6cf1: PacketDef(
@@ -780,7 +780,7 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x010a,
         name="PLAYER_IDENTITY",
         direction=Direction.S2C,
-        size=406,  # 1 instance — rich player profile: name + clan + skill
+        size=406,  # confirmed — 2 instances across 2 captures, consistent 406b
         description="Player identity — char name, clan, active skill ('Lady Rachel', 'Good Night', 'ExCeLlence')",
         fields=[
             FieldDef("header", 2, 3, "bytes", "Header params"),
@@ -790,7 +790,7 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
             FieldDef("skill_name", 50, 10, "str", "Active skill name ('ExCeLlence')"),
             FieldDef("skill_delim_end", 60, 2, "bytes", "Skill name end delimiter (0xf0 0x2d)"),
         ],
-        confirmed=False,
+        confirmed=True,
     ),
 
     # ---- Variable-size unknowns (boundary-scanned framing) ----
@@ -863,6 +863,128 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         size=26,
         description="Player action (attack/skill/pickup), encrypted payload",
         confirmed=True,
+    ),
+
+    # ---- Discovered from live_test_02 (2026-02-27, live capture #2) ----
+
+    0x7d0c: PacketDef(
+        opcode=0x7d0c,
+        name="ENTITY_HEADING",
+        direction=Direction.S2C,
+        size=14,  # confirmed — 176 instances, consistent 14b structure, heavy TCP coalescing
+        description="Entity heading/speed update — direction flags + speed value",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("direction_flags", 6, 4, "u32le", "Direction/facing flags (0x40/0x60/0xC0)"),
+            FieldDef("speed", 10, 4, "f32", "Movement speed (~13.5-14.0)"),
+        ],
+        confirmed=True,
+    ),
+
+    0x410c: PacketDef(
+        opcode=0x410c,
+        name="ENTITY_SPAWN_EX",
+        direction=Direction.S2C,
+        size=None,  # variable: 34-611b — large entity data with coords
+        description="Extended entity spawn/update — variable length with position data",
+        confirmed=False,
+    ),
+
+    0x5e0c: PacketDef(
+        opcode=0x5e0c,
+        name="ENTITY_EFFECT_LINK",
+        direction=Direction.S2C,
+        size=10,  # base size 10b — often coalesced with EFFECT (4a0e) + ENTITY_HEADING (7d0c)
+        description="Entity effect link — entity + param, pairs with EFFECT packet",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("param", 6, 4, "u32le", "Effect parameter / color RGBA"),
+        ],
+        confirmed=False,
+    ),
+
+    0x1400: PacketDef(
+        opcode=0x1400,
+        name="ENTITY_COMBAT_INFO",
+        direction=Direction.S2C,
+        size=None,  # variable: 7-50b — entity combat state with coords
+        description="Entity combat info — variable with entity ID, coords, speed",
+        confirmed=False,
+    ),
+
+    0x350c: PacketDef(
+        opcode=0x350c,
+        name="ENTITY_STATE_DATA",
+        direction=Direction.S2C,
+        size=None,  # variable: 46-86b — mostly zeros, entity family
+        description="Entity state/config data block (mostly zeros)",
+        confirmed=False,
+    ),
+
+    0x360c: PacketDef(
+        opcode=0x360c,
+        name="ENTITY_ZONE_REF",
+        direction=Direction.S2C,
+        size=28,  # 1 instance — contains coordinates
+        description="Entity zone reference — coordinates + zone data",
+        fields=[
+            FieldDef("length", 2, 2, "u16le", "Packet length"),
+            FieldDef("zone_ref", 4, 4, "u32le", "Zone reference ID"),
+        ],
+        confirmed=False,
+    ),
+
+    0x4e0c: PacketDef(
+        opcode=0x4e0c,
+        name="ENTITY_CONTROL",
+        direction=Direction.S2C,
+        size=7,  # 1 instance — minimal entity command
+        description="Entity control/command (entity family, 7 bytes)",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("command", 6, 1, "u8", "Command type"),
+        ],
+        confirmed=False,
+    ),
+
+    0x4614: PacketDef(
+        opcode=0x4614,
+        name="ENTITY_DETAIL_C",
+        direction=Direction.S2C,
+        size=23,  # 1 instance — 0xxx14 entity detail family
+        description="Entity detail variant C — entity + coords + speed",
+        fields=[
+            FieldDef("zeros", 2, 2, "bytes", "Padding"),
+            FieldDef("entity_id", 4, 4, "u32le", "Entity ID"),
+        ],
+        confirmed=False,
+    ),
+
+    0x9b0d: PacketDef(
+        opcode=0x9b0d,
+        name="ENTITY_STAT_EX",
+        direction=Direction.S2C,
+        size=42,  # 1 instance — 0xxx0d stats family, contains embedded 7d0c refs
+        description="Extended entity stat — stat data with embedded entity refs",
+        confirmed=False,
+    ),
+
+    0x170e: PacketDef(
+        opcode=0x170e,
+        name="EFFECT_BATCH",
+        direction=Direction.S2C,
+        size=None,  # variable: 1350b — contains repeated 170e sub-entries
+        description="Effect batch — large packet with repeated effect sub-entries",
+        confirmed=False,
+    ),
+
+    0x0017: PacketDef(
+        opcode=0x0017,
+        name="SYSTEM_DATA_LARGE",
+        direction=Direction.S2C,
+        size=None,  # variable: 1092b — large system data block
+        description="Large system data block (1092 bytes, contains entity refs)",
+        confirmed=False,
     ),
 }
 
