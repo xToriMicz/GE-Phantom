@@ -307,6 +307,8 @@ static void shmem_init(void)
  * Called from hooked_send/hooked_recv which run on the game's main thread.
  * The cmd_poll_thread sets g_mainthread_cmd; this function executes it.
  */
+static volatile LONG g_mainthread_busy = 0;  /* reentrancy guard */
+
 static void try_execute_mainthread_cmd(void)
 {
     BYTE cmd;
@@ -316,6 +318,14 @@ static void try_execute_mainthread_cmd(void)
 
     cmd = g_mainthread_cmd;
     if (cmd == CMD_NOP) return;
+
+    /* Reentrancy guard — if Chat/SysMsg calls send() internally,
+     * hooked_send would re-enter here. Prevent infinite recursion. */
+    if (InterlockedCompareExchange(&g_mainthread_busy, 1, 0) != 0)
+        return;
+
+    /* Claim command immediately — prevent poll thread from re-deferring */
+    g_mainthread_cmd = CMD_NOP;
 
     switch (cmd) {
     case CMD_GET_PROP:
@@ -365,15 +375,21 @@ static void try_execute_mainthread_cmd(void)
     case CMD_CHAT:
     {
         char text[64];
+        BYTE first_bytes[8];
         memcpy(text, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
         text[63] = '\0';
 
-        log_write("MAIN_THREAD CMD: CHAT text=\"%s\" fn=0x%08X",
-            text, (DWORD)(DWORD_PTR)g_fn_chat);
+        /* Read first bytes at function address for diagnostics */
+        memcpy(first_bytes, (void *)g_fn_chat, 8);
+        log_write("MAIN_THREAD CMD: CHAT text=\"%s\" fn=0x%08X bytes=[%02X %02X %02X %02X %02X %02X %02X %02X]",
+            text, (DWORD)(DWORD_PTR)g_fn_chat,
+            first_bytes[0], first_bytes[1], first_bytes[2], first_bytes[3],
+            first_bytes[4], first_bytes[5], first_bytes[6], first_bytes[7]);
 
         __try {
+            log_write("  calling g_fn_chat...");
             g_fn_chat(text);
-            log_write("  -> CHAT OK");
+            log_write("  -> CHAT OK (returned)");
             mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -386,15 +402,21 @@ static void try_execute_mainthread_cmd(void)
     case CMD_SYSMSG:
     {
         char text[64];
+        BYTE first_bytes[8];
         memcpy(text, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
         text[63] = '\0';
 
-        log_write("MAIN_THREAD CMD: SYSMSG text=\"%s\" fn=0x%08X",
-            text, (DWORD)(DWORD_PTR)g_fn_sysmsg);
+        /* Read first bytes at function address for diagnostics */
+        memcpy(first_bytes, (void *)g_fn_sysmsg, 8);
+        log_write("MAIN_THREAD CMD: SYSMSG text=\"%s\" fn=0x%08X bytes=[%02X %02X %02X %02X %02X %02X %02X %02X]",
+            text, (DWORD)(DWORD_PTR)g_fn_sysmsg,
+            first_bytes[0], first_bytes[1], first_bytes[2], first_bytes[3],
+            first_bytes[4], first_bytes[5], first_bytes[6], first_bytes[7]);
 
         __try {
+            log_write("  calling g_fn_sysmsg...");
             g_fn_sysmsg(text);
-            log_write("  -> SYSMSG OK");
+            log_write("  -> SYSMSG OK (returned)");
             mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -408,9 +430,11 @@ static void try_execute_mainthread_cmd(void)
         break;
     }
 
-    /* Clear the main-thread command flag + shared mem command */
-    g_mainthread_cmd = CMD_NOP;
+    /* Clear command in shmem — ready for next */
     mem[CMD_OFF_COMMAND] = CMD_NOP;
+
+    /* Release reentrancy guard */
+    InterlockedExchange(&g_mainthread_busy, 0);
 }
 
 /* ─── Hook Functions ──────────────────────────────────────────── */
@@ -686,6 +710,10 @@ static int WSAAPI detour_send(SOCKET s, const char *buf, int len, int flags)
     int result;
 
     InterlockedIncrement(&g_send_count);
+
+    /* Execute pending game-thread commands (same as hooked_send) */
+    try_execute_mainthread_cmd();
+
     pipe_write_packet(DIR_C2S, buf, len);
 
     EnterCriticalSection(&g_detour_lock);
@@ -700,6 +728,9 @@ static int WSAAPI detour_send(SOCKET s, const char *buf, int len, int flags)
 static int WSAAPI detour_recv(SOCKET s, char *buf, int len, int flags)
 {
     int result;
+
+    /* Execute pending game-thread commands (same as hooked_recv) */
+    try_execute_mainthread_cmd();
 
     EnterCriticalSection(&g_detour_lock);
     inline_unhook(g_recv_real_addr, g_recv_orig_bytes);

@@ -54,7 +54,7 @@
 #define GE_FUNC_GET_PROP_NUM    0x0089D5FC   /* GetPropertyNumber: double __cdecl (objName, idSpace, propName) */
 #define GE_FUNC_SET_PROP_NUM    0x005C62A2   /* SetPropertyNumber: void __cdecl (objName, idSpace, propName, value) */
 #define GE_FUNC_CHAT_INTERNAL   0x004FAB43   /* void __cdecl (const char*) — Chat: sends to server + local */
-#define GE_FUNC_SYSMSG_INTERNAL 0x0050C6F8   /* void __cdecl (const char*) — SysMsg: local system message */
+#define GE_FUNC_SYSMSG_INTERNAL 0x0050C6FC   /* void __cdecl (const char*) — SysMsg: local system message */
 
 /* ─── Phase 2: Command Interface ─────────────────────────────── */
 
