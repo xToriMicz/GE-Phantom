@@ -318,7 +318,7 @@ class RadarState:
         eid = d.get("entity_id", 0)
         if not eid:
             return
-        attack_range = d.get("attack_range")
+        speed = d.get("speed")
         x = d.get("x")
         y = d.get("y")
         state = d.get("state")
@@ -327,8 +327,8 @@ class RadarState:
         if eid not in self.characters:
             self.characters[eid] = CharacterInfo(entity_id=eid)
         ci = self.characters[eid]
-        if attack_range is not None:
-            ci.attack_range = attack_range
+        if speed is not None:
+            ci.speed = speed
         if state is not None:
             ci.state_flags = state
         if zone is not None:
