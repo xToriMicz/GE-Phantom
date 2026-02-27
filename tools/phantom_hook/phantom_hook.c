@@ -1,11 +1,14 @@
 /**
- * phantom_hook.c — GE_Phantom Reconnaissance DLL (Phase 1)
+ * phantom_hook.c — GE_Phantom Reconnaissance DLL (Phase 1 + Phase 2)
  *
- * IAT-hooks send() and recv() in ge.exe to capture plaintext packets
- * before encryption (C2S) and after decryption (S2C).
+ * Phase 1: IAT-hooks send() and recv() in ge.exe to capture packets.
+ * Phase 2: IES property scanner — scans .text for xrefs to known strings,
+ *          provides GetPropertyNumber/SetPropertyNumber callers via
+ *          shared memory command interface.
  *
- * Communication: Named pipe \\.\pipe\ge_phantom streams packets to
- * an external Python reader (packet_logger.py).
+ * Communication:
+ *   - Named pipe \\.\pipe\ge_phantom streams packets to Python reader
+ *   - Shared memory "Local\\ge_phantom_cmd" for Phase 2 command interface
  *
  * Build (32-bit, from VS x86 command prompt):
  *   cl /LD /O2 phantom_hook.c ws2_32.lib user32.lib
@@ -108,6 +111,15 @@ static volatile LONG g_recv_count = 0;
 
 /* Critical section for pipe writes (send/recv may be on different threads) */
 static CRITICAL_SECTION g_pipe_lock;
+
+/* ─── Phase 2: Command Interface Globals ─────────────────────── */
+
+static HANDLE  g_cmd_shmem_handle = NULL;
+static volatile BYTE *g_cmd = NULL;
+
+/* Resolved function addresses (filled by xref scan + manual analysis) */
+static fn_GetPropertyNumber g_fn_get_prop = NULL;
+static fn_SetPropertyNumber g_fn_set_prop = NULL;
 
 /* ─── Pipe Communication ──────────────────────────────────────── */
 
@@ -615,6 +627,422 @@ static void remove_detour_hooks(void)
     DeleteCriticalSection(&g_detour_lock);
 }
 
+/* ─── Phase 2: Cross-Reference Scanner ────────────────────────── */
+
+/**
+ * Xref target: a string address we want to find references to in .text
+ */
+typedef struct {
+    DWORD   addr;       /* Address of the string in .rdata */
+    const char *label;  /* Human-readable label for logging */
+} xref_target_t;
+
+static const xref_target_t g_xref_targets[] = {
+    { GE_STR_SET_PROP_NUM, "SetPropertyNumber" },
+    { GE_STR_GET_PROP_NUM, "GetPropertyNumber" },
+    { GE_STR_SPL_RANGE,    "SplRange"          },
+    { GE_STR_KEEP_RANGE,   "KeepRange"         },
+};
+
+/**
+ * Decode what kind of x86 instruction references our target address.
+ * Looks backwards from the match position to identify the instruction.
+ *
+ * Returns a string describing the instruction type.
+ */
+static const char *decode_instruction_type(const BYTE *text_base, DWORD match_offset)
+{
+    const BYTE *p;
+
+    /* Check 1 byte before: PUSH imm32 (68 XX XX XX XX) */
+    if (match_offset >= 1) {
+        p = text_base + match_offset - 1;
+        if (*p == 0x68)
+            return "PUSH imm32";
+    }
+
+    /* Check 1 byte before: MOV reg, imm32 (B8-BF XX XX XX XX) */
+    if (match_offset >= 1) {
+        p = text_base + match_offset - 1;
+        if (*p >= 0xB8 && *p <= 0xBF) {
+            static char mov_buf[32];
+            sprintf(mov_buf, "MOV %s, imm32",
+                (*p == 0xB8) ? "EAX" : (*p == 0xB9) ? "ECX" :
+                (*p == 0xBA) ? "EDX" : (*p == 0xBB) ? "EBX" :
+                (*p == 0xBC) ? "ESP" : (*p == 0xBD) ? "EBP" :
+                (*p == 0xBE) ? "ESI" : "EDI");
+            return mov_buf;
+        }
+    }
+
+    /* Check 2 bytes before: LEA reg, [imm32] (8D /r XX XX XX XX) */
+    if (match_offset >= 2) {
+        p = text_base + match_offset - 2;
+        if (p[0] == 0x8D && (p[1] & 0xC7) == 0x05)
+            return "LEA reg, [imm32]";
+    }
+
+    /* Check 2 bytes before: MOV [mem], imm32 (C7 05 XX XX XX XX XX XX XX XX) */
+    if (match_offset >= 2) {
+        p = text_base + match_offset - 2;
+        if (p[0] == 0xC7)
+            return "MOV [mem], imm32";
+    }
+
+    return "unknown";
+}
+
+/**
+ * Scan the .text section of ge.exe for all references to target string addresses.
+ * For each match, log the instruction type and surrounding bytes.
+ *
+ * This is a brute-force scan — we look for the 4-byte LE address pattern
+ * anywhere in .text, which is valid because ge.exe has no ASLR.
+ */
+static void scan_xrefs(void)
+{
+    BYTE *text_start = (BYTE *)GE_TEXT_START;
+    DWORD text_size  = GE_TEXT_END - GE_TEXT_START;
+    int t, total_found = 0;
+
+    log_write("=== XREF SCAN START ===");
+    log_write("Scanning .text: 0x%08X - 0x%08X (%u bytes)",
+        GE_TEXT_START, GE_TEXT_END, text_size);
+
+    /* Verify memory is readable */
+    {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(text_start, &mbi, sizeof(mbi)) == 0) {
+            log_write("XREF SCAN: VirtualQuery failed — cannot read .text");
+            return;
+        }
+        log_write("  .text region: base=%p size=0x%X state=0x%X protect=0x%X",
+            mbi.BaseAddress, (DWORD)mbi.RegionSize, mbi.State, mbi.Protect);
+    }
+
+    for (t = 0; t < XREF_TARGET_COUNT; t++) {
+        DWORD target_addr = g_xref_targets[t].addr;
+        const char *label = g_xref_targets[t].label;
+        BYTE needle[4];
+        DWORD i;
+        int found = 0;
+
+        /* Build little-endian needle */
+        needle[0] = (BYTE)(target_addr & 0xFF);
+        needle[1] = (BYTE)((target_addr >> 8) & 0xFF);
+        needle[2] = (BYTE)((target_addr >> 16) & 0xFF);
+        needle[3] = (BYTE)((target_addr >> 24) & 0xFF);
+
+        log_write("--- Scanning for \"%s\" (0x%08X) needle=[%02X %02X %02X %02X] ---",
+            label, target_addr, needle[0], needle[1], needle[2], needle[3]);
+
+        /* Linear scan through .text */
+        for (i = 0; i < text_size - 4; i++) {
+            if (text_start[i]   == needle[0] &&
+                text_start[i+1] == needle[1] &&
+                text_start[i+2] == needle[2] &&
+                text_start[i+3] == needle[3])
+            {
+                DWORD abs_addr = GE_TEXT_START + i;
+                const char *insn_type = decode_instruction_type(text_start, i);
+                int ctx_before = (i >= 16) ? 16 : (int)i;
+                int ctx_after  = (i + 4 + 16 <= text_size) ? 16 : (int)(text_size - i - 4);
+                char hex_buf[256];
+                int h, hpos = 0;
+                BYTE *ctx_start = text_start + i - ctx_before;
+                int ctx_total = ctx_before + 4 + ctx_after;
+
+                found++;
+                total_found++;
+
+                /* Format context bytes as hex */
+                for (h = 0; h < ctx_total && hpos < 240; h++) {
+                    if (h == ctx_before)
+                        hpos += sprintf(hex_buf + hpos, "[");
+                    hpos += sprintf(hex_buf + hpos, "%02X", ctx_start[h]);
+                    if (h == ctx_before + 3)
+                        hpos += sprintf(hex_buf + hpos, "]");
+                    else if (h < ctx_total - 1)
+                        hpos += sprintf(hex_buf + hpos, " ");
+                }
+
+                log_write("  XREF #%d: \"%s\" at 0x%08X — %s",
+                    found, label, abs_addr, insn_type);
+                log_write("    context: %s", hex_buf);
+
+                /* For PUSH instructions, check what's pushed before/after (tolua++ pattern) */
+                if (i >= 5 && text_start[i-5] == 0x68) {
+                    DWORD prev_push = *(DWORD *)(text_start + i - 4);
+                    log_write("    prev PUSH: 0x%08X (possible function ptr)", prev_push);
+                }
+                if (i >= 1 && text_start[i-1] == 0x68) {
+                    /* This IS a PUSH of our string. Check next instruction for function ptr push */
+                    if (i + 4 < text_size - 5 && text_start[i+4] == 0x68) {
+                        DWORD next_push = *(DWORD *)(text_start + i + 5);
+                        log_write("    next PUSH: 0x%08X (possible function ptr)", next_push);
+                    }
+                    if (i + 4 < text_size - 5 && text_start[i+4] == 0xE8) {
+                        DWORD rel = *(DWORD *)(text_start + i + 5);
+                        DWORD call_target = (GE_TEXT_START + i + 4) + 5 + rel;
+                        log_write("    next CALL: 0x%08X (relative)", call_target);
+                    }
+                }
+            }
+        }
+
+        log_write("  Found %d xrefs for \"%s\"", found, label);
+    }
+
+    log_write("=== XREF SCAN DONE — %d total xrefs found ===", total_found);
+}
+
+/* ─── Phase 2: Property Function Callers ─────────────────────── */
+
+/**
+ * Call GetPropertyNumber with the resolved function pointer.
+ * Returns the property value as a double, or -9999.0 on error.
+ */
+static double call_get_property(int idSpace, const char *objName, const char *propName)
+{
+    double result;
+
+    if (!g_fn_get_prop) {
+        log_write("call_get_property: function not resolved!");
+        return -9999.0;
+    }
+
+    log_write("call_get_property(%d, \"%s\", \"%s\") @ 0x%08X",
+        idSpace, objName ? objName : "(null)", propName,
+        (DWORD)(DWORD_PTR)g_fn_get_prop);
+
+    __try {
+        result = g_fn_get_prop(idSpace, objName, propName);
+        log_write("  → result = %f", result);
+        return result;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        log_write("  → EXCEPTION 0x%08X!", GetExceptionCode());
+        return -9999.0;
+    }
+}
+
+/**
+ * Call SetPropertyNumber with the resolved function pointer.
+ * Returns TRUE on success, FALSE on exception.
+ */
+static BOOL call_set_property(int idSpace, const char *objName, const char *propName, double value)
+{
+    if (!g_fn_set_prop) {
+        log_write("call_set_property: function not resolved!");
+        return FALSE;
+    }
+
+    log_write("call_set_property(%d, \"%s\", \"%s\", %f) @ 0x%08X",
+        idSpace, objName ? objName : "(null)", propName, value,
+        (DWORD)(DWORD_PTR)g_fn_set_prop);
+
+    __try {
+        g_fn_set_prop(idSpace, objName, propName, value);
+        log_write("  → OK");
+        return TRUE;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        log_write("  → EXCEPTION 0x%08X!", GetExceptionCode());
+        return FALSE;
+    }
+}
+
+/* ─── Phase 2: Command Handler ───────────────────────────────── */
+
+/**
+ * Initialize the command shared memory (separate from Phase 1 ctl shmem).
+ */
+static void cmd_shmem_init(void)
+{
+    g_cmd_shmem_handle = CreateFileMappingA(
+        INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+        0, CMD_SHMEM_SIZE, GE_SHMEM_CMD_NAME
+    );
+
+    if (g_cmd_shmem_handle) {
+        g_cmd = (volatile BYTE *)MapViewOfFile(
+            g_cmd_shmem_handle, FILE_MAP_ALL_ACCESS,
+            0, 0, CMD_SHMEM_SIZE
+        );
+        if (g_cmd) {
+            memset((void *)g_cmd, 0, CMD_SHMEM_SIZE);
+            log_write("cmd_shmem: mapped at %p", g_cmd);
+        }
+    } else {
+        log_write("cmd_shmem: CreateFileMapping failed (err=%u)", GetLastError());
+    }
+}
+
+/**
+ * Process a single command from the shared memory command interface.
+ */
+static void process_command(void)
+{
+    BYTE cmd;
+    volatile BYTE *mem = g_cmd;
+
+    if (!mem) return;
+
+    cmd = mem[CMD_OFF_COMMAND];
+    if (cmd == CMD_NOP) return;
+
+    /* Mark busy */
+    mem[CMD_OFF_STATUS] = CMD_STATUS_BUSY;
+
+    switch (cmd) {
+    case CMD_PING:
+        log_write("CMD: PING");
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = 0xDEADBEEF;
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+
+    case CMD_SCAN:
+        log_write("CMD: SCAN");
+        scan_xrefs();
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+
+    case CMD_GET_PROP:
+    {
+        int idSpace = *(volatile int *)(mem + CMD_OFF_PARAM1);
+        char propName[64];
+        char objName[64];
+        double val;
+
+        /* Copy string params (volatile → local) */
+        memcpy(propName, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
+        propName[63] = '\0';
+        memcpy(objName, (const void *)(mem + CMD_OFF_STR_PARAM2), 64);
+        objName[63] = '\0';
+
+        log_write("CMD: GET_PROP idSpace=%d obj=\"%s\" prop=\"%s\"",
+            idSpace, objName, propName);
+
+        val = call_get_property(idSpace, objName[0] ? objName : NULL, propName);
+        *(volatile double *)(mem + CMD_OFF_RESULT_F64) = val;
+        *(volatile float *)(mem + CMD_OFF_RESULT_F32) = (float)val;
+        mem[CMD_OFF_STATUS] = (val == -9999.0) ? CMD_STATUS_ERROR : CMD_STATUS_DONE;
+        break;
+    }
+
+    case CMD_SET_PROP:
+    {
+        int idSpace = *(volatile int *)(mem + CMD_OFF_PARAM1);
+        char propName[64];
+        char objName[64];
+        double value;
+        BOOL ok;
+
+        memcpy(propName, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
+        propName[63] = '\0';
+        memcpy(objName, (const void *)(mem + CMD_OFF_STR_PARAM2), 64);
+        objName[63] = '\0';
+        value = *(volatile double *)(mem + CMD_OFF_RESULT_F64);
+
+        log_write("CMD: SET_PROP idSpace=%d obj=\"%s\" prop=\"%s\" val=%f",
+            idSpace, objName, propName, value);
+
+        ok = call_set_property(idSpace, objName[0] ? objName : NULL, propName, value);
+        mem[CMD_OFF_STATUS] = ok ? CMD_STATUS_DONE : CMD_STATUS_ERROR;
+        break;
+    }
+
+    case CMD_READ_ADDR:
+    {
+        DWORD addr = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
+        log_write("CMD: READ_ADDR 0x%08X", addr);
+
+        __try {
+            DWORD val = *(DWORD *)addr;
+            *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = val;
+            log_write("  → 0x%08X", val);
+            mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            log_write("  → ACCESS VIOLATION!");
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+        }
+        break;
+    }
+
+    default:
+        log_write("CMD: UNKNOWN 0x%02X", cmd);
+        mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+        break;
+    }
+
+    /* Clear command — ready for next */
+    mem[CMD_OFF_COMMAND] = CMD_NOP;
+}
+
+/**
+ * Background thread: polls command shared memory every 50ms.
+ */
+static volatile BOOL g_cmd_thread_running = FALSE;
+
+static DWORD WINAPI cmd_poll_thread(LPVOID param)
+{
+    (void)param;
+    log_write("cmd_poll_thread: started");
+
+    while (g_cmd_thread_running) {
+        process_command();
+        Sleep(50);
+    }
+
+    log_write("cmd_poll_thread: stopped");
+    return 0;
+}
+
+static HANDLE g_cmd_thread = NULL;
+
+static void cmd_start(void)
+{
+    g_cmd_thread_running = TRUE;
+    g_cmd_thread = CreateThread(NULL, 0, cmd_poll_thread, NULL, 0, NULL);
+    if (g_cmd_thread) {
+        log_write("cmd: poll thread started");
+    } else {
+        log_write("cmd: FAILED to create poll thread");
+    }
+}
+
+static void cmd_stop(void)
+{
+    if (g_cmd_thread) {
+        g_cmd_thread_running = FALSE;
+        WaitForSingleObject(g_cmd_thread, 2000);
+        CloseHandle(g_cmd_thread);
+        g_cmd_thread = NULL;
+    }
+}
+
+/* ─── Phase 2: Manual Address Setup ──────────────────────────── */
+
+/**
+ * Set function addresses manually (after analyzing xref scan results).
+ * Called via CMD_SET_PROP with special idSpace = 0xFFFF to set addresses.
+ *
+ * For now, addresses are logged by scan — user reads log, then sets
+ * via range_control.py which writes addresses to shared memory.
+ */
+static void set_function_addresses(DWORD get_addr, DWORD set_addr)
+{
+    if (get_addr) {
+        g_fn_get_prop = (fn_GetPropertyNumber)get_addr;
+        log_write("set_function_addresses: GetPropertyNumber = 0x%08X", get_addr);
+    }
+    if (set_addr) {
+        g_fn_set_prop = (fn_SetPropertyNumber)set_addr;
+        log_write("set_function_addresses: SetPropertyNumber = 0x%08X", set_addr);
+    }
+}
+
 /* ─── DLL Entry Point ─────────────────────────────────────────── */
 
 static BOOL g_using_detour = FALSE;
@@ -659,11 +1087,26 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         }
 
         log_write("=== hooks installed, ready ===");
+
+        /* Phase 2: Initialize command interface */
+        cmd_shmem_init();
+
+        /* Phase 2: Run xref scan immediately on attach */
+        log_write("Phase 2: running initial xref scan...");
+        scan_xrefs();
+
+        /* Phase 2: Start command poll thread */
+        cmd_start();
+
+        log_write("=== Phase 2 initialized ===");
         break;
 
     case DLL_PROCESS_DETACH:
         log_write("=== DLL_PROCESS_DETACH === send=%d recv=%d",
             g_send_count, g_recv_count);
+
+        /* Phase 2: Stop command thread */
+        cmd_stop();
 
         /* Clean up hooks */
         if (g_using_detour) {
@@ -678,7 +1121,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
             g_pipe = INVALID_HANDLE_VALUE;
         }
 
-        /* Clean up shared memory */
+        /* Clean up shared memory (Phase 1) */
         if (g_ctl) {
             UnmapViewOfFile((void *)g_ctl);
             g_ctl = NULL;
@@ -686,6 +1129,16 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         if (g_shmem_handle) {
             CloseHandle(g_shmem_handle);
             g_shmem_handle = NULL;
+        }
+
+        /* Clean up shared memory (Phase 2) */
+        if (g_cmd) {
+            UnmapViewOfFile((void *)g_cmd);
+            g_cmd = NULL;
+        }
+        if (g_cmd_shmem_handle) {
+            CloseHandle(g_cmd_shmem_handle);
+            g_cmd_shmem_handle = NULL;
         }
 
         DeleteCriticalSection(&g_pipe_lock);

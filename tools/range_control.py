@@ -1,0 +1,486 @@
+"""
+GE_Phantom — Range Control (Phase 2)
+
+Interactive controller for the phantom_hook DLL's command interface.
+Communicates via shared memory to trigger xref scans, read/write
+IES properties (GetPropertyNumber / SetPropertyNumber).
+
+Usage:
+  python tools/range_control.py              # Interactive mode
+  python tools/range_control.py ping         # Ping DLL
+  python tools/range_control.py scan         # Trigger xref scan
+  python tools/range_control.py get <prop>   # Get property value
+  python tools/range_control.py set <prop> <value>  # Set property value
+
+Requires: phantom_hook.dll injected into ge.exe (via dll_injector.py)
+"""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import ctypes.wintypes as wt
+import mmap
+import struct
+import sys
+import time
+
+# ── Shared Memory Layout (must match phantom_hook.h) ──────────
+
+SHMEM_NAME = "Local\\ge_phantom_cmd"
+SHMEM_SIZE = 256
+
+# Offsets
+OFF_COMMAND     = 0x00
+OFF_STATUS      = 0x01
+OFF_PARAM1      = 0x04
+OFF_PARAM2      = 0x08
+OFF_RESULT_I32  = 0x0C
+OFF_RESULT_F32  = 0x10
+OFF_RESULT_F64  = 0x14
+OFF_STR_PARAM   = 0x20
+OFF_STR_PARAM2  = 0x60
+OFF_STR_RESULT  = 0xA0
+
+# Commands
+CMD_NOP         = 0x00
+CMD_SCAN        = 0x01
+CMD_GET_PROP    = 0x02
+CMD_SET_PROP    = 0x03
+CMD_READ_ADDR   = 0x10
+CMD_PING        = 0xFE
+
+# Status
+STATUS_IDLE     = 0x00
+STATUS_BUSY     = 0x01
+STATUS_DONE     = 0x02
+STATUS_ERROR    = 0xFF
+
+# Known properties
+KNOWN_PROPS = [
+    "SplRange",
+    "KeepRange",
+    "ViewRange",
+    "AiRange",
+    "MaxLinkRange",
+]
+
+# ── Win32 API ─────────────────────────────────────────────────
+
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+FILE_MAP_ALL_ACCESS = 0x000F001F
+
+
+def open_shmem() -> mmap.mmap | None:
+    """Open the shared memory created by phantom_hook DLL."""
+    # Use Win32 OpenFileMappingA to get handle
+    handle = kernel32.OpenFileMappingA(
+        FILE_MAP_ALL_ACCESS,
+        False,
+        SHMEM_NAME.encode("ascii"),
+    )
+    if not handle:
+        return None
+
+    # Map the view
+    ptr = kernel32.MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, SHMEM_SIZE)
+    if not ptr:
+        kernel32.CloseHandle(handle)
+        return None
+
+    # Wrap in a ctypes buffer we can read/write
+    buf = (ctypes.c_char * SHMEM_SIZE).from_address(ptr)
+    return handle, ptr, buf
+
+
+class PhantomCmd:
+    """Interface to phantom_hook DLL command shared memory."""
+
+    def __init__(self):
+        result = open_shmem()
+        if result is None:
+            raise RuntimeError(
+                "Cannot open shared memory. Is phantom_hook.dll injected?\n"
+                f"  Shared memory name: {SHMEM_NAME}"
+            )
+        self._handle, self._ptr, self._buf = result
+
+    def close(self):
+        if self._ptr:
+            kernel32.UnmapViewOfFile(self._ptr)
+            self._ptr = None
+        if self._handle:
+            kernel32.CloseHandle(self._handle)
+            self._handle = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def _read_byte(self, offset: int) -> int:
+        return self._buf[offset][0]
+
+    def _write_byte(self, offset: int, value: int):
+        self._buf[offset] = bytes([value])
+
+    def _read_u32(self, offset: int) -> int:
+        return struct.unpack_from("<I", bytes(self._buf[offset:offset+4]))[0]
+
+    def _write_u32(self, offset: int, value: int):
+        data = struct.pack("<I", value)
+        for i, b in enumerate(data):
+            self._buf[offset + i] = bytes([b])
+
+    def _read_f64(self, offset: int) -> float:
+        return struct.unpack_from("<d", bytes(self._buf[offset:offset+8]))[0]
+
+    def _write_f64(self, offset: int, value: float):
+        data = struct.pack("<d", value)
+        for i, b in enumerate(data):
+            self._buf[offset + i] = bytes([b])
+
+    def _write_str(self, offset: int, s: str, max_len: int = 64):
+        encoded = s.encode("ascii", errors="replace")[:max_len - 1] + b"\x00"
+        padded = encoded.ljust(max_len, b"\x00")
+        for i, b in enumerate(padded):
+            self._buf[offset + i] = bytes([b])
+
+    def _read_str(self, offset: int, max_len: int = 96) -> str:
+        raw = bytes(self._buf[offset:offset + max_len])
+        end = raw.find(b"\x00")
+        if end >= 0:
+            raw = raw[:end]
+        return raw.decode("ascii", errors="replace")
+
+    def _send_cmd(self, cmd: int, timeout: float = 5.0) -> int:
+        """Send a command and wait for completion. Returns status code."""
+        # Clear status
+        self._write_byte(OFF_STATUS, STATUS_IDLE)
+        # Write command
+        self._write_byte(OFF_COMMAND, cmd)
+
+        # Poll for completion
+        start = time.monotonic()
+        while True:
+            status = self._read_byte(OFF_STATUS)
+            if status == STATUS_DONE or status == STATUS_ERROR:
+                return status
+            if time.monotonic() - start > timeout:
+                return -1  # timeout
+            time.sleep(0.05)
+
+    def ping(self) -> bool:
+        """Ping the DLL. Returns True if it responds."""
+        status = self._send_cmd(CMD_PING)
+        if status == STATUS_DONE:
+            val = self._read_u32(OFF_RESULT_I32)
+            return val == 0xDEADBEEF
+        return False
+
+    def scan(self) -> bool:
+        """Trigger xref scan. Results are written to phantom_hook.log."""
+        status = self._send_cmd(CMD_SCAN, timeout=30.0)
+        return status == STATUS_DONE
+
+    def get_property(self, prop_name: str, id_space: int = 0,
+                     obj_name: str = "") -> float | None:
+        """Read a property value via GetPropertyNumber."""
+        self._write_u32(OFF_PARAM1, id_space)
+        self._write_str(OFF_STR_PARAM, prop_name)
+        self._write_str(OFF_STR_PARAM2, obj_name)
+
+        status = self._send_cmd(CMD_GET_PROP)
+        if status == STATUS_DONE:
+            return self._read_f64(OFF_RESULT_F64)
+        return None
+
+    def set_property(self, prop_name: str, value: float, id_space: int = 0,
+                     obj_name: str = "") -> bool:
+        """Write a property value via SetPropertyNumber."""
+        self._write_u32(OFF_PARAM1, id_space)
+        self._write_str(OFF_STR_PARAM, prop_name)
+        self._write_str(OFF_STR_PARAM2, obj_name)
+        self._write_f64(OFF_RESULT_F64, value)
+
+        status = self._send_cmd(CMD_SET_PROP)
+        return status == STATUS_DONE
+
+    def read_addr(self, address: int) -> int | None:
+        """Read 4 bytes from an address in ge.exe memory."""
+        self._write_u32(OFF_PARAM1, address)
+        status = self._send_cmd(CMD_READ_ADDR)
+        if status == STATUS_DONE:
+            return self._read_u32(OFF_RESULT_I32)
+        return None
+
+
+# ── CLI Commands ──────────────────────────────────────────────
+
+def cmd_ping(args):
+    with PhantomCmd() as cmd:
+        if cmd.ping():
+            print("[+] DLL responded: 0xDEADBEEF — alive!")
+            return 0
+        else:
+            print("[!] DLL did not respond")
+            return 1
+
+
+def cmd_scan(args):
+    print("[*] Triggering xref scan...")
+    with PhantomCmd() as cmd:
+        if cmd.scan():
+            print("[+] Scan complete — check phantom_hook.log for results")
+            return 0
+        else:
+            print("[!] Scan failed or timed out")
+            return 1
+
+
+def cmd_get(args):
+    prop = args.property
+    id_space = args.id_space
+    obj = args.obj or ""
+
+    with PhantomCmd() as cmd:
+        print(f"[*] GetPropertyNumber(idSpace={id_space}, obj=\"{obj}\", prop=\"{prop}\")")
+        val = cmd.get_property(prop, id_space, obj)
+        if val is not None:
+            print(f"[+] {prop} = {val}")
+            return 0
+        else:
+            print(f"[!] Failed to get {prop}")
+            return 1
+
+
+def cmd_set(args):
+    prop = args.property
+    value = args.value
+    id_space = args.id_space
+    obj = args.obj or ""
+
+    with PhantomCmd() as cmd:
+        print(f"[*] SetPropertyNumber(idSpace={id_space}, obj=\"{obj}\", prop=\"{prop}\", val={value})")
+        if cmd.set_property(prop, value, id_space, obj):
+            print(f"[+] {prop} set to {value}")
+            return 0
+        else:
+            print(f"[!] Failed to set {prop}")
+            return 1
+
+
+def cmd_read(args):
+    addr = int(args.address, 16) if args.address.startswith("0x") else int(args.address)
+    with PhantomCmd() as cmd:
+        val = cmd.read_addr(addr)
+        if val is not None:
+            print(f"[+] [0x{addr:08X}] = 0x{val:08X} ({val})")
+            return 0
+        else:
+            print(f"[!] Failed to read 0x{addr:08X}")
+            return 1
+
+
+def cmd_probe(args):
+    """Probe all known range properties."""
+    id_space = args.id_space
+    obj = args.obj or ""
+
+    with PhantomCmd() as cmd:
+        if not cmd.ping():
+            print("[!] DLL not responding")
+            return 1
+
+        print(f"[*] Probing range properties (idSpace={id_space}, obj=\"{obj}\"):\n")
+
+        for prop in KNOWN_PROPS:
+            val = cmd.get_property(prop, id_space, obj)
+            if val is not None:
+                print(f"  {prop:20s} = {val}")
+            else:
+                print(f"  {prop:20s} = (error)")
+
+        return 0
+
+
+def cmd_interactive(args):
+    """Interactive command loop."""
+    try:
+        cmd = PhantomCmd()
+    except RuntimeError as e:
+        print(f"[!] {e}")
+        return 1
+
+    if not cmd.ping():
+        print("[!] DLL not responding to ping")
+        cmd.close()
+        return 1
+
+    print("[+] Connected to phantom_hook DLL")
+    print()
+    print("Commands:")
+    print("  ping                 — Ping DLL")
+    print("  scan                 — Trigger xref scan (results in log)")
+    print("  get <prop> [id] [obj] — Get property value")
+    print("  set <prop> <val> [id] [obj] — Set property value")
+    print("  read <hex_addr>      — Read 4 bytes from address")
+    print("  probe [id] [obj]     — Probe all known range properties")
+    print("  quit                 — Exit")
+    print()
+
+    while True:
+        try:
+            line = input("phantom> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not line:
+            continue
+
+        parts = line.split()
+        verb = parts[0].lower()
+
+        try:
+            if verb == "quit" or verb == "exit" or verb == "q":
+                break
+
+            elif verb == "ping":
+                if cmd.ping():
+                    print("[+] alive!")
+                else:
+                    print("[!] no response")
+
+            elif verb == "scan":
+                print("[*] Scanning...")
+                if cmd.scan():
+                    print("[+] Done — check phantom_hook.log")
+                else:
+                    print("[!] Failed")
+
+            elif verb == "get":
+                if len(parts) < 2:
+                    print("Usage: get <prop> [id_space] [obj_name]")
+                    continue
+                prop = parts[1]
+                id_s = int(parts[2]) if len(parts) > 2 else 0
+                obj = parts[3] if len(parts) > 3 else ""
+                val = cmd.get_property(prop, id_s, obj)
+                if val is not None:
+                    print(f"  {prop} = {val}")
+                else:
+                    print(f"  (error)")
+
+            elif verb == "set":
+                if len(parts) < 3:
+                    print("Usage: set <prop> <value> [id_space] [obj_name]")
+                    continue
+                prop = parts[1]
+                val = float(parts[2])
+                id_s = int(parts[3]) if len(parts) > 3 else 0
+                obj = parts[4] if len(parts) > 4 else ""
+                if cmd.set_property(prop, val, id_s, obj):
+                    print(f"  OK")
+                else:
+                    print(f"  (error)")
+
+            elif verb == "read":
+                if len(parts) < 2:
+                    print("Usage: read <hex_address>")
+                    continue
+                addr_str = parts[1]
+                addr = int(addr_str, 16) if addr_str.startswith("0x") else int(addr_str)
+                val = cmd.read_addr(addr)
+                if val is not None:
+                    # Also show as ASCII if printable
+                    ascii_chars = ""
+                    for shift in range(4):
+                        b = (val >> (shift * 8)) & 0xFF
+                        ascii_chars += chr(b) if 32 <= b < 127 else "."
+                    print(f"  [0x{addr:08X}] = 0x{val:08X}  {ascii_chars}")
+                else:
+                    print(f"  (error reading 0x{addr:08X})")
+
+            elif verb == "probe":
+                id_s = int(parts[1]) if len(parts) > 1 else 0
+                obj = parts[2] if len(parts) > 2 else ""
+                print(f"  Probing (idSpace={id_s}, obj=\"{obj}\"):")
+                for prop in KNOWN_PROPS:
+                    val = cmd.get_property(prop, id_s, obj)
+                    if val is not None:
+                        print(f"    {prop:20s} = {val}")
+                    else:
+                        print(f"    {prop:20s} = (error)")
+
+            else:
+                print(f"Unknown command: {verb}")
+
+        except Exception as e:
+            print(f"[!] Error: {e}")
+
+    cmd.close()
+    print("[*] Goodbye")
+    return 0
+
+
+# ── Main ──────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="GE_Phantom Range Control — Phase 2 command interface"
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # ping
+    sub.add_parser("ping", help="Ping the DLL")
+
+    # scan
+    sub.add_parser("scan", help="Trigger xref scan")
+
+    # get
+    p_get = sub.add_parser("get", help="Get property value")
+    p_get.add_argument("property", help="Property name (e.g. SplRange)")
+    p_get.add_argument("--id-space", type=int, default=0, help="ID space (default: 0)")
+    p_get.add_argument("--obj", default="", help="Object name")
+    p_get.set_defaults(func=cmd_get)
+
+    # set
+    p_set = sub.add_parser("set", help="Set property value")
+    p_set.add_argument("property", help="Property name")
+    p_set.add_argument("value", type=float, help="Value to set")
+    p_set.add_argument("--id-space", type=int, default=0, help="ID space (default: 0)")
+    p_set.add_argument("--obj", default="", help="Object name")
+    p_set.set_defaults(func=cmd_set)
+
+    # read
+    p_read = sub.add_parser("read", help="Read memory address")
+    p_read.add_argument("address", help="Address (hex with 0x prefix)")
+    p_read.set_defaults(func=cmd_read)
+
+    # probe
+    p_probe = sub.add_parser("probe", help="Probe all known range properties")
+    p_probe.add_argument("--id-space", type=int, default=0, help="ID space")
+    p_probe.add_argument("--obj", default="", help="Object name")
+    p_probe.set_defaults(func=cmd_probe)
+
+    # interactive (default)
+    sub.add_parser("interactive", help="Interactive command loop")
+
+    args = parser.parse_args()
+
+    if not args.command or args.command == "interactive":
+        return cmd_interactive(args)
+
+    if args.command == "ping":
+        return cmd_ping(args)
+    if args.command == "scan":
+        return cmd_scan(args)
+
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

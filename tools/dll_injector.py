@@ -34,6 +34,8 @@ MEM_RESERVE            = 0x00002000
 MEM_RELEASE            = 0x00008000
 PAGE_READWRITE         = 0x04
 
+CREATE_SUSPENDED       = 0x00000004
+
 INFINITE               = 0xFFFFFFFF
 TH32CS_SNAPPROCESS     = 0x02
 TH32CS_SNAPMODULE      = 0x08
@@ -72,6 +74,38 @@ class MODULEENTRY32(ctypes.Structure):
         ("hModule",         ctypes.c_void_p),
         ("szModule",        ctypes.c_char * (MAX_MODULE_NAME32 + 1)),
         ("szExePath",       ctypes.c_char * MAX_PATH),
+    ]
+
+
+class STARTUPINFOA(ctypes.Structure):
+    _fields_ = [
+        ("cb",              wt.DWORD),
+        ("lpReserved",      ctypes.c_char_p),
+        ("lpDesktop",       ctypes.c_char_p),
+        ("lpTitle",         ctypes.c_char_p),
+        ("dwX",             wt.DWORD),
+        ("dwY",             wt.DWORD),
+        ("dwXSize",         wt.DWORD),
+        ("dwYSize",         wt.DWORD),
+        ("dwXCountChars",   wt.DWORD),
+        ("dwYCountChars",   wt.DWORD),
+        ("dwFillAttribute", wt.DWORD),
+        ("dwFlags",         wt.DWORD),
+        ("wShowWindow",     wt.WORD),
+        ("cbReserved2",     wt.WORD),
+        ("lpReserved2",     ctypes.c_void_p),
+        ("hStdInput",       wt.HANDLE),
+        ("hStdOutput",      wt.HANDLE),
+        ("hStdError",       wt.HANDLE),
+    ]
+
+
+class PROCESS_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("hProcess",    wt.HANDLE),
+        ("hThread",     wt.HANDLE),
+        ("dwProcessId", wt.DWORD),
+        ("dwThreadId",  wt.DWORD),
     ]
 
 # ── Win32 API Handles ─────────────────────────────────────────
@@ -491,6 +525,131 @@ def eject_dll(pid: int, dll_name: str) -> bool:
         kernel32.CloseHandle(hProcess)
 
 
+def launch_and_inject(exe_path: str, dll_path: str, working_dir: str | None = None) -> bool:
+    """
+    Launch ge.exe in SUSPENDED state, inject DLL, then resume.
+    This ensures our DLL loads before the game initializes.
+    """
+    si = STARTUPINFOA()
+    si.cb = ctypes.sizeof(STARTUPINFOA)
+    pi = PROCESS_INFORMATION()
+
+    if working_dir is None:
+        working_dir = os.path.dirname(exe_path)
+
+    exe_bytes = exe_path.encode("ascii")
+    dir_bytes = working_dir.encode("ascii") if working_dir else None
+
+    print(f"[*] Launching: {exe_path}")
+    print(f"[*] Working dir: {working_dir}")
+    print(f"[*] Flags: CREATE_SUSPENDED")
+
+    ok = kernel32.CreateProcessA(
+        exe_bytes,          # lpApplicationName
+        None,               # lpCommandLine
+        None,               # lpProcessAttributes
+        None,               # lpThreadAttributes
+        False,              # bInheritHandles
+        CREATE_SUSPENDED,   # dwCreationFlags
+        None,               # lpEnvironment
+        dir_bytes,          # lpCurrentDirectory
+        ctypes.byref(si),
+        ctypes.byref(pi),
+    )
+
+    if not ok:
+        err = ctypes.get_last_error()
+        print(f"[!] CreateProcess failed: error {err}")
+        return False
+
+    pid = pi.dwProcessId
+    print(f"[+] Process created — PID {pid} (SUSPENDED)")
+
+    try:
+        # Inject DLL while process is suspended
+        dll_bytes = dll_path.encode("ascii") + b"\x00"
+
+        # Find LoadLibraryA in the target process
+        print("[*] Resolving LoadLibraryA in target process...")
+        load_library_addr = find_remote_function(
+            pi.hProcess, pid, "KERNEL32.DLL", "LoadLibraryA"
+        )
+        if load_library_addr is None:
+            load_library_addr = find_remote_function(
+                pi.hProcess, pid, "kernel32.dll", "LoadLibraryA"
+            )
+        if load_library_addr is None:
+            print("[!] Could not resolve LoadLibraryA — terminating process")
+            kernel32.TerminateProcess(pi.hProcess, 1)
+            return False
+
+        print(f"[*] LoadLibraryA at 0x{load_library_addr:08X}")
+
+        # Allocate + write DLL path
+        remote_addr = kernel32.VirtualAllocEx(
+            pi.hProcess, None, len(dll_bytes),
+            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE,
+        )
+        if not remote_addr:
+            print(f"[!] VirtualAllocEx failed — terminating process")
+            kernel32.TerminateProcess(pi.hProcess, 1)
+            return False
+
+        written = ctypes.c_size_t(0)
+        kernel32.WriteProcessMemory(
+            pi.hProcess, remote_addr, dll_bytes,
+            len(dll_bytes), ctypes.byref(written),
+        )
+
+        # Create remote thread to load DLL (process is still suspended, but remote threads can run)
+        print("[*] Injecting DLL into suspended process...")
+        thread_id = wt.DWORD(0)
+        hThread = kernel32.CreateRemoteThread(
+            pi.hProcess, None, 0,
+            ctypes.c_void_p(load_library_addr),
+            ctypes.c_void_p(remote_addr),
+            0, ctypes.byref(thread_id),
+        )
+
+        if not hThread:
+            print(f"[!] CreateRemoteThread failed — terminating process")
+            kernel32.TerminateProcess(pi.hProcess, 1)
+            return False
+
+        # Wait for DLL to load
+        print("[*] Waiting for DLL to load...")
+        kernel32.WaitForSingleObject(hThread, INFINITE)
+
+        exit_code = wt.DWORD(0)
+        kernel32.GetExitCodeThread(hThread, ctypes.byref(exit_code))
+        kernel32.CloseHandle(hThread)
+        kernel32.VirtualFreeEx(pi.hProcess, remote_addr, 0, MEM_RELEASE)
+
+        if exit_code.value == 0:
+            print("[!] LoadLibraryA returned NULL — DLL failed to load")
+            print("[!] Terminating suspended process")
+            kernel32.TerminateProcess(pi.hProcess, 1)
+            return False
+
+        print(f"[+] DLL loaded! HMODULE = 0x{exit_code.value:08X}")
+
+        # Resume the main thread — game starts with our hooks already in place
+        print("[*] Resuming main thread...")
+        result = kernel32.ResumeThread(pi.hThread)
+        if result == -1:
+            print(f"[!] ResumeThread failed: {ctypes.get_last_error()}")
+            return False
+
+        print(f"[+] Process resumed — game starting with hooks active")
+        print(f"[+] PID: {pid}")
+        print(f"[*] Check phantom_hook.log for xref scan results")
+        return True
+
+    finally:
+        kernel32.CloseHandle(pi.hThread)
+        kernel32.CloseHandle(pi.hProcess)
+
+
 # ── CLI ────────────────────────────────────────────────────────
 
 def cmd_inject(args):
@@ -553,6 +712,44 @@ def cmd_eject(args):
     return 1
 
 
+def cmd_launch(args):
+    """Launch ge.exe suspended, inject DLL, then resume."""
+    # Resolve DLL path
+    try:
+        dll_path = resolve_dll_path(args.dll)
+    except FileNotFoundError as e:
+        print(f"[!] {e}")
+        return 1
+
+    # Resolve exe path
+    exe_path = args.exe
+    if not os.path.isfile(exe_path):
+        print(f"[!] ge.exe not found at: {exe_path}")
+        print("    Use --exe to specify the full path to ge.exe")
+        return 1
+
+    exe_path = os.path.abspath(exe_path)
+    print(f"[*] DLL: {dll_path}")
+    print(f"[*] EXE: {exe_path}")
+
+    # Check if already running
+    pids = find_ge_pids()
+    if pids:
+        print(f"[!] ge.exe is already running (PID {pids[0][0]})")
+        print("    Close it first, or use 'inject' to hook the running instance")
+        return 1
+
+    if launch_and_inject(exe_path, dll_path, args.workdir):
+        print()
+        print("[+] Launch + inject successful!")
+        print(f"    DLL hooks active from process start")
+        return 0
+    else:
+        print()
+        print("[!] Launch + inject failed")
+        return 1
+
+
 def cmd_list(args):
     """List modules loaded in ge.exe."""
     pids = find_ge_pids()
@@ -596,6 +793,22 @@ def main():
         help=f"DLL to inject (default: {DEFAULT_DLL})"
     )
     p_inject.set_defaults(func=cmd_inject)
+
+    # launch
+    p_launch = sub.add_parser("launch", help="Launch ge.exe suspended, inject DLL, resume")
+    p_launch.add_argument(
+        "--dll", default=DEFAULT_DLL,
+        help=f"DLL to inject (default: {DEFAULT_DLL})"
+    )
+    p_launch.add_argument(
+        "--exe", default=r"C:\Granado Espada\ge.exe",
+        help="Path to ge.exe (default: C:\\Granado Espada\\ge.exe)"
+    )
+    p_launch.add_argument(
+        "--workdir", default=None,
+        help="Working directory (default: same as exe)"
+    )
+    p_launch.set_defaults(func=cmd_launch)
 
     # eject
     p_eject = sub.add_parser("eject", help="Unload DLL from ge.exe")
