@@ -128,6 +128,9 @@ static fn_SysMsgInternal g_fn_sysmsg = (fn_SysMsgInternal)GE_FUNC_SYSMSG_INTERNA
 /* UpdateItemTable — address resolved dynamically via CMD_SET_FUNC_ADDR (which=2) */
 static fn_UpdateItemTable g_fn_update_item_table = NULL;
 
+/* Game window handle — found once, cached for SendKey */
+static HWND g_game_hwnd = NULL;
+
 /* Flag: pending game-thread command (GET_PROP/SET_PROP must run on main thread) */
 static volatile BYTE g_mainthread_cmd = CMD_NOP;
 
@@ -2057,6 +2060,148 @@ static void process_command(void)
         }
 
         mem[CMD_OFF_STATUS] = (xref_count > 0) ? CMD_STATUS_DONE : CMD_STATUS_ERROR;
+        break;
+    }
+
+    /* ── Phase 5: Keyboard Input ─────────────────────────── */
+
+    case CMD_SEND_KEY:
+    {
+        DWORD vk   = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
+        DWORD flags = *(volatile DWORD *)(mem + CMD_OFF_PARAM2);
+        /* flags: 0 = tap (down + up), 1 = down only, 2 = up only */
+        UINT scancode;
+        LPARAM lparam_down, lparam_up;
+
+        /* Find game window if not cached */
+        if (!g_game_hwnd || !IsWindow(g_game_hwnd)) {
+            /* Try known Granado Espada window class names */
+            g_game_hwnd = FindWindowA("Granado Espada", NULL);
+            if (!g_game_hwnd)
+                g_game_hwnd = FindWindowA(NULL, "Granado Espada");
+            if (!g_game_hwnd) {
+                /* Fallback: find by PID — enumerate windows for our process */
+                DWORD pid = GetCurrentProcessId();
+                HWND hw = GetTopWindow(NULL);
+                while (hw) {
+                    DWORD wnd_pid = 0;
+                    GetWindowThreadProcessId(hw, &wnd_pid);
+                    if (wnd_pid == pid && IsWindowVisible(hw)) {
+                        g_game_hwnd = hw;
+                        break;
+                    }
+                    hw = GetNextWindow(hw, GW_HWNDNEXT);
+                }
+            }
+        }
+
+        if (!g_game_hwnd) {
+            log_write("CMD: SEND_KEY — game window not found!");
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+            break;
+        }
+
+        scancode = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
+        lparam_down = (LPARAM)(1 | (scancode << 16));
+        lparam_up   = (LPARAM)(1 | (scancode << 16) | (1 << 30) | (1 << 31));
+
+        log_write("CMD: SEND_KEY vk=0x%02X scan=0x%02X flags=%u hwnd=%p",
+            vk, scancode, flags, g_game_hwnd);
+
+        if (flags == 0 || flags == 1) {
+            PostMessageA(g_game_hwnd, WM_KEYDOWN, (WPARAM)vk, lparam_down);
+        }
+        if (flags == 0 || flags == 2) {
+            if (flags == 0) Sleep(30);  /* brief hold for tap */
+            PostMessageA(g_game_hwnd, WM_KEYUP, (WPARAM)vk, lparam_up);
+        }
+
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = (DWORD)(DWORD_PTR)g_game_hwnd;
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+    }
+
+    case CMD_SEND_KEYS:
+    {
+        char seq[64];
+        DWORD delay_ms = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
+        int i, sent = 0;
+        UINT scancode;
+        LPARAM lp_down, lp_up;
+
+        memcpy(seq, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
+        seq[63] = '\0';
+
+        if (delay_ms == 0) delay_ms = 80;  /* default 80ms between keys */
+
+        /* Find game window */
+        if (!g_game_hwnd || !IsWindow(g_game_hwnd)) {
+            g_game_hwnd = FindWindowA("Granado Espada", NULL);
+            if (!g_game_hwnd)
+                g_game_hwnd = FindWindowA(NULL, "Granado Espada");
+            if (!g_game_hwnd) {
+                DWORD pid = GetCurrentProcessId();
+                HWND hw = GetTopWindow(NULL);
+                while (hw) {
+                    DWORD wnd_pid = 0;
+                    GetWindowThreadProcessId(hw, &wnd_pid);
+                    if (wnd_pid == pid && IsWindowVisible(hw)) {
+                        g_game_hwnd = hw;
+                        break;
+                    }
+                    hw = GetNextWindow(hw, GW_HWNDNEXT);
+                }
+            }
+        }
+
+        if (!g_game_hwnd) {
+            log_write("CMD: SEND_KEYS — game window not found!");
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+            break;
+        }
+
+        log_write("CMD: SEND_KEYS seq=\"%s\" delay=%u hwnd=%p", seq, delay_ms, g_game_hwnd);
+
+        for (i = 0; seq[i] != '\0'; i++) {
+            BYTE vk;
+            char ch = seq[i];
+
+            /* Convert character to virtual key code */
+            if (ch >= 'a' && ch <= 'z')
+                vk = (BYTE)(ch - 'a' + 'A');  /* VK_A..VK_Z = 0x41..0x5A */
+            else if (ch >= 'A' && ch <= 'Z')
+                vk = (BYTE)ch;
+            else if (ch >= '0' && ch <= '9')
+                vk = (BYTE)ch;  /* VK_0..VK_9 = 0x30..0x39 */
+            else if (ch == ' ')
+                vk = VK_SPACE;
+            else if (ch == '\t')
+                vk = VK_TAB;
+            else if (ch == '\n' || ch == '\r')
+                vk = VK_RETURN;
+            else {
+                /* Try VkKeyScan for other characters */
+                SHORT vks = VkKeyScanA(ch);
+                if (vks == -1) continue;
+                vk = (BYTE)(vks & 0xFF);
+            }
+
+            scancode = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
+            lp_down = (LPARAM)(1 | (scancode << 16));
+            lp_up   = (LPARAM)(1 | (scancode << 16) | (1 << 30) | (1 << 31));
+
+            PostMessageA(g_game_hwnd, WM_KEYDOWN, (WPARAM)vk, lp_down);
+            Sleep(30);
+            PostMessageA(g_game_hwnd, WM_KEYUP, (WPARAM)vk, lp_up);
+            sent++;
+
+            if (seq[i + 1] != '\0')
+                Sleep(delay_ms);
+        }
+
+        log_write("  → sent %d keys", sent);
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = sent;
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
         break;
     }
 

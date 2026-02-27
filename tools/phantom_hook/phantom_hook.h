@@ -112,6 +112,8 @@
                                        /* ⚠ UNSAFE: causes server disconnect! Requires param1=0xCAFE to confirm */
 #define CMD_SYSMSG              0x41   /* SysMsg(str_param) → local system message display */
 #define CMD_UPDATE_ITEM_TABLE   0x42   /* UpdateItemTable() → flush IES cache (main thread) */
+#define CMD_SEND_KEY            0x43   /* SendKey: param1=VK code, param2=flags (0=tap,1=down,2=up) */
+#define CMD_SEND_KEYS           0x44   /* SendKeys: str_param=key sequence, param1=delay_ms between keys */
 #define CMD_DUMP_MEM            0x50   /* Dump N bytes: param1=addr, param2=count(max 96) → str_result as hex */
 #define CMD_SCAN_XREF_STR      0x51   /* Find string in .rdata, then scan .text for xrefs → str_result */
 #define CMD_PING                0xFE   /* Ping → status=done, result_i32=0xDEADBEEF */

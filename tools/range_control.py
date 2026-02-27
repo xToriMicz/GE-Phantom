@@ -62,6 +62,8 @@ CMD_VTGET_STATUS        = 0x34
 CMD_CHAT            = 0x40   # ⚠ UNSAFE: causes disconnect! Requires param1=0xCAFE
 CMD_SYSMSG          = 0x41
 CMD_UPDATE_ITEM_TABLE = 0x42
+CMD_SEND_KEY        = 0x43
+CMD_SEND_KEYS       = 0x44
 CMD_DUMP_MEM        = 0x50
 CMD_SCAN_XREF_STR   = 0x51
 CMD_PING            = 0xFE
@@ -392,6 +394,50 @@ class PhantomCmd:
             return self.sysmsg(msg)
         return self.sysmsg(f"{prop_name}=ERROR")
 
+    # ── Phase 5: Keyboard Input ───────────────────────────────
+
+    # Common VK codes for convenience
+    VK_MAP = {
+        "space": 0x20, "enter": 0x0D, "return": 0x0D, "tab": 0x09,
+        "esc": 0x1B, "escape": 0x1B, "backspace": 0x08,
+        "shift": 0x10, "ctrl": 0x11, "alt": 0x12,
+        "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+        "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73,
+        "f5": 0x74, "f6": 0x75, "f7": 0x76, "f8": 0x77,
+        "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
+        "insert": 0x2D, "delete": 0x2E, "home": 0x24, "end": 0x23,
+        "pageup": 0x21, "pagedown": 0x22,
+    }
+
+    def send_key(self, key: str | int, flags: int = 0) -> bool:
+        """Send a single keypress to the game window.
+        key: VK code (int), single char ('q'), or name ('f1', 'space', 'enter')
+        flags: 0=tap (down+up), 1=down only, 2=up only"""
+        if isinstance(key, int):
+            vk = key
+        elif len(key) == 1:
+            vk = ord(key.upper())
+        else:
+            vk = self.VK_MAP.get(key.lower(), 0)
+            if vk == 0:
+                return False
+
+        self._write_u32(OFF_PARAM1, vk)
+        self._write_u32(OFF_PARAM2, flags)
+        status = self._send_cmd(CMD_SEND_KEY)
+        return status == STATUS_DONE
+
+    def send_keys(self, sequence: str, delay_ms: int = 80) -> int:
+        """Send a sequence of key taps. Returns number of keys sent.
+        sequence: string of characters to type (e.g. 'qwerty')
+        delay_ms: milliseconds between each key (default 80)"""
+        self._write_str(OFF_STR_PARAM, sequence)
+        self._write_u32(OFF_PARAM1, delay_ms)
+        status = self._send_cmd(CMD_SEND_KEYS, timeout=len(sequence) * (delay_ms + 50) / 1000 + 5)
+        if status == STATUS_DONE:
+            return self._read_u32(OFF_RESULT_I32)
+        return 0
+
 
 # ── CLI Commands ──────────────────────────────────────────────
 
@@ -536,6 +582,11 @@ def cmd_interactive(args):
     print("  findxref <string>        — Find string + scan xrefs in .text")
     print("  updateitem               — Call UpdateItemTable() (set addr first!)")
     print("  debugprop <prop> [id]    — Get property + show via SysMsg in-game")
+    print("  --- Phase 5: Keyboard Input ---")
+    print("  key <key>                — Tap a key (q, w, e, r, f1, space, etc.)")
+    print("  keydown <key>            — Hold key down")
+    print("  keyup <key>              — Release key")
+    print("  keys <sequence> [delay]  — Type a sequence (e.g., keys qwerty 100)")
     print("  --- Phase 3: VTable ---")
     print("  spy                  — One-shot vtable spy at xref #1 (getter)")
     print("  spy2                 — One-shot vtable spy at xref #2 (SETTER site)")
@@ -788,6 +839,65 @@ def cmd_interactive(args):
                         print(f"  → SysMsg failed")
                 else:
                     print(f"  (error reading {prop})")
+
+            # ── Phase 5: Keyboard Input commands ──────────────
+
+            elif verb == "key":
+                if len(parts) < 2:
+                    print("Usage: key <key>  (q, w, e, r, f1, space, enter, etc.)")
+                    print("       key 0x51   (raw VK code in hex)")
+                    continue
+                key_str = parts[1]
+                if key_str.startswith("0x"):
+                    key_arg = int(key_str, 16)
+                else:
+                    key_arg = key_str
+                if cmd.send_key(key_arg):
+                    print(f"  [+] key '{key_str}' tapped")
+                else:
+                    print(f"  [!] failed (unknown key or window not found)")
+
+            elif verb == "keydown":
+                if len(parts) < 2:
+                    print("Usage: keydown <key>")
+                    continue
+                key_str = parts[1]
+                if key_str.startswith("0x"):
+                    key_arg = int(key_str, 16)
+                else:
+                    key_arg = key_str
+                if cmd.send_key(key_arg, flags=1):
+                    print(f"  [+] key '{key_str}' DOWN")
+                else:
+                    print(f"  [!] failed")
+
+            elif verb == "keyup":
+                if len(parts) < 2:
+                    print("Usage: keyup <key>")
+                    continue
+                key_str = parts[1]
+                if key_str.startswith("0x"):
+                    key_arg = int(key_str, 16)
+                else:
+                    key_arg = key_str
+                if cmd.send_key(key_arg, flags=2):
+                    print(f"  [+] key '{key_str}' UP")
+                else:
+                    print(f"  [!] failed")
+
+            elif verb == "keys":
+                if len(parts) < 2:
+                    print("Usage: keys <sequence> [delay_ms]")
+                    print("  e.g.: keys qwerty 100")
+                    continue
+                sequence = parts[1]
+                delay = int(parts[2]) if len(parts) > 2 else 80
+                print(f"[*] Sending keys: \"{sequence}\" (delay={delay}ms)")
+                sent = cmd.send_keys(sequence, delay)
+                if sent > 0:
+                    print(f"  [+] sent {sent} keys")
+                else:
+                    print(f"  [!] failed")
 
             # ── Phase 3: VTable commands ──────────────────────
 
