@@ -43,7 +43,8 @@ _PACKET_COLORS: dict[str, str] = {
     "COMBAT_DATA": "red",
     "TARGET_LINK": "red",
     "MONSTER_SPAWN": "bright_red",
-    "NPC_SPAWN": "blue",
+    "ENTITY_SPAWN_B": "bright_red",
+    "ENTITY_SPAWN_EX": "bright_red",
     "OBJECT_SPAWN": "dim",
     "ENTITY_DESPAWN": "dim",
     "ENTITY_POSITION": "bright_black",
@@ -131,7 +132,7 @@ class EntityPanel(Vertical):
 
     def on_mount(self) -> None:
         table: DataTable = self.query_one("#entity-table", DataTable)
-        table.add_columns("ID", "Type", "Position", "Speed", "Range", "Zone", "Last Seen")
+        table.add_columns("ID", "Type", "Position", "Dist", "Speed", "Range", "Zone", "Last Seen")
 
     def refresh_entities(self, state: RadarState) -> None:
         """Rebuild the entity table from current state."""
@@ -155,6 +156,18 @@ class EntityPanel(Vertical):
             type_text = Text(ent.entity_type, style=f"bold {color}")
             pos_text = Text(f"({ent.x}, {ent.y})")
 
+            # Distance from player
+            dist = state.distance_to_player(ent.entity_id)
+            if dist is not None:
+                if dist < 500:
+                    dist_text = Text(f"{dist:.0f}", style="bold green")
+                elif dist < 1500:
+                    dist_text = Text(f"{dist:.0f}", style="yellow")
+                else:
+                    dist_text = Text(f"{dist:.0f}", style="dim")
+            else:
+                dist_text = Text("-")
+
             speed_text = Text(f"{ci.speed:.0f}" if ci and ci.speed else "-")
             range_text = Text(f"{ci.attack_range:.0f}" if ci and ci.attack_range else "-")
             zone_text = Text(str(ci.zone) if ci and ci.zone else "-")
@@ -167,7 +180,7 @@ class EntityPanel(Vertical):
             else:
                 seen_text = Text(f"{ago:.0f}s ago", style="dim")
 
-            table.add_row(eid_text, type_text, pos_text, speed_text, range_text, zone_text, seen_text,
+            table.add_row(eid_text, type_text, pos_text, dist_text, speed_text, range_text, zone_text, seen_text,
                           key=str(ent.entity_id))
 
     def show_detail(self, entity_id: int, state: RadarState) -> None:
@@ -180,7 +193,9 @@ class EntityPanel(Vertical):
             detail.update("Entity not found")
             return
 
-        lines = [f"Entity #{ent.entity_id} ({ent.entity_type})  pos=({ent.x}, {ent.y})"]
+        dist = state.distance_to_player(entity_id)
+        dist_str = f"  dist={dist:.0f}" if dist is not None else ""
+        lines = [f"Entity #{ent.entity_id} ({ent.entity_type})  pos=({ent.x}, {ent.y}){dist_str}"]
         if ci:
             lines.append(
                 f"  range={ci.attack_range:.0f}  speed={ci.speed:.0f}  "
@@ -189,7 +204,16 @@ class EntityPanel(Vertical):
             )
         target = state.combat_targets.get(entity_id)
         if target:
-            lines.append(f"  targeting -> #{target}")
+            target_ent = state.entities.get(target)
+            target_dist = state.distance_to_player(target)
+            target_info = f"#{target}"
+            if target_ent:
+                target_info += f" ({target_ent.entity_type} at {target_ent.x},{target_ent.y})"
+            if target_dist is not None:
+                target_info += f" dist={target_dist:.0f}"
+            lines.append(f"  targeting -> {target_info}")
+        if state.player_entity_id:
+            lines.append(f"  [Player #{state.player_entity_id} at ({state.player_x}, {state.player_y})]")
         detail.update("\n".join(lines))
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -286,6 +310,20 @@ class SessionPanel(Vertical):
         zone_str = str(state.current_zone) if state.current_zone else "-"
         n_transitions = len(state.zone_transitions)
 
+        # Count entity types and find nearest monster
+        n_monsters = 0
+        nearest_dist = None
+        with state._lock:
+            for ent in state.entities.values():
+                if ent.entity_type == "monster":
+                    n_monsters += 1
+                    d = state.distance_to_player(ent.entity_id)
+                    if d is not None and (nearest_dist is None or d < nearest_dist):
+                        nearest_dist = d
+
+        player_str = f"#{state.player_entity_id} ({state.player_x}, {state.player_y})" if state.player_entity_id else "not detected"
+        nearest_str = f"{nearest_dist:.0f}" if nearest_dist is not None else "-"
+
         lines = [
             f"GE_Phantom Dashboard",
             f"{'=' * 40}",
@@ -295,6 +333,9 @@ class SessionPanel(Vertical):
             f"Total Packets:     {state.total_packets}",
             f"Current Zone:      {zone_str}" + (f"  ({n_transitions} transitions)" if n_transitions else ""),
             f"",
+            f"Player:            {player_str}",
+            f"Nearest Monster:   {nearest_str}",
+            f"Monsters:          {n_monsters}",
             f"Entities Tracked:  {n_entities}",
             f"Characters:        {n_chars}",
             f"",

@@ -126,6 +126,10 @@ class RadarState:
         # Zone tracking
         self.current_zone: int = 0
         self.zone_transitions: list[ZoneTransition] = []
+        # Player tracking for distance calculation
+        self.player_entity_id: int = 0
+        self.player_x: int = 0
+        self.player_y: int = 0
 
     def on_update(self, callback: UpdateCallback) -> None:
         """Subscribe to state changes."""
@@ -143,6 +147,17 @@ class RadarState:
         if not self.my_chars:
             return True  # No filter = show everything
         return owner_name.lower() in self.my_chars
+
+    def distance_to_player(self, entity_id: int) -> float | None:
+        """Calculate distance from player to an entity. Returns None if player position unknown."""
+        if not self.player_entity_id or entity_id == self.player_entity_id:
+            return None
+        ent = self.entities.get(entity_id)
+        if not ent or (ent.x == 0 and ent.y == 0):
+            return None
+        dx = ent.x - self.player_x
+        dy = ent.y - self.player_y
+        return (dx * dx + dy * dy) ** 0.5
 
     def process_packet(self, pkt: GEPacket) -> dict | None:
         """Process a captured packet and update state. Returns decoded dict or None."""
@@ -171,7 +186,9 @@ class RadarState:
                     self._handle_despawn(decoded)
                 case "TARGET_LINK":
                     self._handle_target(decoded)
-                case "MONSTER_SPAWN" | "NPC_SPAWN" | "OBJECT_SPAWN":
+                case "MONSTER_SPAWN" | "ENTITY_SPAWN_B" | "OBJECT_SPAWN":
+                    self._handle_spawn(decoded, name, pkt.timestamp)
+                case "ENTITY_SPAWN_EX":
                     self._handle_spawn(decoded, name, pkt.timestamp)
                 case "COMBAT_UPDATE":
                     self._handle_combat(decoded, pkt.timestamp)
@@ -244,6 +261,10 @@ class RadarState:
             ent.y = int(y)
         ent.entity_type = "player"
         ent.last_seen = ts
+        # Track player position for distance calculations
+        self.player_entity_id = eid
+        self.player_x = ent.x
+        self.player_y = ent.y
         self._notify("position", d)
 
     def _handle_item_drop(self, d: dict, ts: float) -> None:
@@ -281,7 +302,8 @@ class RadarState:
             return
         etype = {
             "MONSTER_SPAWN": "monster",
-            "NPC_SPAWN": "npc",
+            "ENTITY_SPAWN_B": "monster",  # same 371b structure — not NPC-specific
+            "ENTITY_SPAWN_EX": "monster",
             "OBJECT_SPAWN": "object",
         }.get(spawn_type, "unknown")
         self.entities[eid] = Entity(entity_id=eid, entity_type=etype, last_seen=ts)

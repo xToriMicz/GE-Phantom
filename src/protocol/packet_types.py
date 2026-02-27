@@ -141,10 +141,10 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
 
     0x3f0c: PacketDef(
         opcode=0x3f0c,
-        name="NPC_SPAWN",
+        name="ENTITY_SPAWN_B",
         direction=Direction.S2C,
         size=371,  # confirmed — 8 instances across 2 captures, consistent 371b
-        description="NPC spawn (similar structure to monster spawn)",
+        description="Entity spawn group B (same 371b structure as MONSTER_SPAWN — not NPC-specific)",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
         ],
