@@ -67,9 +67,9 @@ class MODULEENTRY32(ctypes.Structure):
         ("th32ProcessID",   wt.DWORD),
         ("GlblcntUsage",    wt.DWORD),
         ("ProccntUsage",    wt.DWORD),
-        ("modBaseAddr",     ctypes.POINTER(ctypes.c_byte)),
+        ("modBaseAddr",     ctypes.c_void_p),
         ("modBaseSize",     wt.DWORD),
-        ("hModule",         wt.HMODULE),
+        ("hModule",         ctypes.c_void_p),
         ("szModule",        ctypes.c_char * (MAX_MODULE_NAME32 + 1)),
         ("szExePath",       ctypes.c_char * MAX_PATH),
     ]
@@ -146,7 +146,7 @@ def list_modules(pid: int) -> list[tuple[str, int, int]]:
     if kernel32.Module32First(snap, ctypes.byref(entry)):
         while True:
             name = entry.szModule.decode("utf-8", errors="ignore")
-            base = ctypes.addressof(entry.modBaseAddr.contents)
+            base = entry.modBaseAddr or 0
             size = entry.modBaseSize
             modules.append((name, base, size))
             if not kernel32.Module32Next(snap, ctypes.byref(entry)):
@@ -194,18 +194,126 @@ def resolve_dll_path(dll_arg: str) -> str:
     )
 
 
+# ── Remote PE Resolution (64-bit Python → 32-bit target) ──────
+
+def read_process_memory(hProcess, address: int, size: int) -> bytes | None:
+    """Read memory from a remote process."""
+    buf = ctypes.create_string_buffer(size)
+    read = ctypes.c_size_t(0)
+    ok = kernel32.ReadProcessMemory(
+        hProcess, ctypes.c_void_p(address), buf, size, ctypes.byref(read)
+    )
+    if not ok or read.value == 0:
+        return None
+    return buf.raw[:read.value]
+
+
+def find_remote_function(hProcess, pid: int, dll_name: str, func_name: str) -> int | None:
+    """
+    Find a function address in a remote 32-bit process by walking its
+    PE export table. This is necessary because 64-bit Python's kernel32
+    addresses are useless for a 32-bit target.
+
+    Steps:
+    1. Find DLL base via module snapshot
+    2. Read DOS header → NT headers → export directory from target memory
+    3. Walk export name table to find the function
+    4. Return base + RVA
+    """
+    # 1. Find DLL base in target process
+    modules = list_modules(pid)
+    target_base = None
+    for name, base, size in modules:
+        if name.lower() == dll_name.lower():
+            target_base = base
+            break
+
+    if target_base is None:
+        print(f"[!] {dll_name} not found in target process")
+        return None
+
+    print(f"[*] Target {dll_name} at 0x{target_base:08X}")
+
+    # 2. Read DOS header to get e_lfanew
+    dos = read_process_memory(hProcess, target_base, 64)
+    if not dos or len(dos) < 64:
+        print("[!] Failed to read DOS header")
+        return None
+
+    magic = struct.unpack_from("<H", dos, 0)[0]
+    if magic != 0x5A4D:  # "MZ"
+        print(f"[!] Bad DOS signature: 0x{magic:04X}")
+        return None
+
+    e_lfanew = struct.unpack_from("<I", dos, 0x3C)[0]
+
+    # 3. Read NT headers (32-bit PE)
+    nt = read_process_memory(hProcess, target_base + e_lfanew, 248)
+    if not nt or len(nt) < 248:
+        print("[!] Failed to read NT headers")
+        return None
+
+    nt_sig = struct.unpack_from("<I", nt, 0)[0]
+    if nt_sig != 0x00004550:  # "PE\0\0"
+        print(f"[!] Bad NT signature: 0x{nt_sig:08X}")
+        return None
+
+    # Export directory RVA is at offset 0x78 in NT headers
+    # (signature=4 + file_header=20 + optional_header offset 96 for export = 120 = 0x78)
+    export_rva = struct.unpack_from("<I", nt, 0x78)[0]
+    if export_rva == 0:
+        print("[!] No export directory")
+        return None
+
+    # 4. Read export directory (IMAGE_EXPORT_DIRECTORY = 40 bytes)
+    export_dir = read_process_memory(hProcess, target_base + export_rva, 40)
+    if not export_dir or len(export_dir) < 40:
+        print("[!] Failed to read export directory")
+        return None
+
+    num_names       = struct.unpack_from("<I", export_dir, 24)[0]
+    addr_table_rva  = struct.unpack_from("<I", export_dir, 28)[0]
+    name_table_rva  = struct.unpack_from("<I", export_dir, 32)[0]
+    ord_table_rva   = struct.unpack_from("<I", export_dir, 36)[0]
+
+    # 5. Read name pointer table and ordinal table
+    name_ptrs = read_process_memory(hProcess, target_base + name_table_rva, num_names * 4)
+    ordinals  = read_process_memory(hProcess, target_base + ord_table_rva, num_names * 2)
+
+    if not name_ptrs or not ordinals:
+        print("[!] Failed to read export tables")
+        return None
+
+    # 6. Binary search / linear scan for function name
+    target_name = func_name.encode("ascii")
+    for i in range(num_names):
+        name_rva = struct.unpack_from("<I", name_ptrs, i * 4)[0]
+        name_bytes = read_process_memory(hProcess, target_base + name_rva, 64)
+        if not name_bytes:
+            continue
+        name_str = name_bytes.split(b"\x00")[0]
+        if name_str == target_name:
+            ordinal = struct.unpack_from("<H", ordinals, i * 2)[0]
+            func_rva_data = read_process_memory(
+                hProcess, target_base + addr_table_rva + ordinal * 4, 4
+            )
+            if not func_rva_data:
+                return None
+            func_rva = struct.unpack_from("<I", func_rva_data, 0)[0]
+            return target_base + func_rva
+
+    print(f"[!] {func_name} not found in {dll_name} export table")
+    return None
+
+
 # ── Core Operations ────────────────────────────────────────────
 
 def inject_dll(pid: int, dll_path: str) -> bool:
     """
     Inject a DLL into the target process using CreateRemoteThread + LoadLibraryA.
 
-    Steps:
-    1. OpenProcess with full access
-    2. VirtualAllocEx — allocate memory for DLL path string
-    3. WriteProcessMemory — write the DLL path
-    4. GetProcAddress(kernel32, "LoadLibraryA") — get loader address
-    5. CreateRemoteThread — call LoadLibraryA(dll_path) in target
+    Handles 64-bit Python → 32-bit target by resolving LoadLibraryA from
+    the target's own kernel32.dll PE export table.
     """
     dll_bytes = dll_path.encode("ascii") + b"\x00"
 
@@ -218,6 +326,22 @@ def inject_dll(pid: int, dll_path: str) -> bool:
         return False
 
     try:
+        # Find LoadLibraryA in the TARGET process's kernel32
+        print("[*] Resolving LoadLibraryA in target process...")
+        load_library_addr = find_remote_function(
+            hProcess, pid, "KERNEL32.DLL", "LoadLibraryA"
+        )
+        # Fallback: try lowercase name (module name varies)
+        if load_library_addr is None:
+            load_library_addr = find_remote_function(
+                hProcess, pid, "kernel32.dll", "LoadLibraryA"
+            )
+        if load_library_addr is None:
+            print("[!] Could not resolve LoadLibraryA in target")
+            return False
+
+        print(f"[*] LoadLibraryA at 0x{load_library_addr:08X}")
+
         # Allocate memory in target process for the DLL path
         print(f"[*] Allocating {len(dll_bytes)} bytes in target process...")
         remote_addr = kernel32.VirtualAllocEx(
@@ -248,19 +372,6 @@ def inject_dll(pid: int, dll_path: str) -> bool:
 
         print(f"[*] Wrote {written.value} bytes to remote process")
 
-        # Get address of LoadLibraryA in kernel32
-        hKernel32 = kernel32.GetModuleHandleA(b"kernel32.dll")
-        if not hKernel32:
-            print("[!] GetModuleHandle(kernel32) failed")
-            return False
-
-        load_library_addr = kernel32.GetProcAddress(hKernel32, b"LoadLibraryA")
-        if not load_library_addr:
-            print("[!] GetProcAddress(LoadLibraryA) failed")
-            return False
-
-        print(f"[*] LoadLibraryA at 0x{load_library_addr:08X}")
-
         # Create remote thread: LoadLibraryA(remote_addr)
         print("[*] Creating remote thread...")
         thread_id = wt.DWORD(0)
@@ -268,8 +379,8 @@ def inject_dll(pid: int, dll_path: str) -> bool:
             hProcess,
             None,       # No security attributes
             0,          # Default stack size
-            load_library_addr,
-            remote_addr,
+            ctypes.c_void_p(load_library_addr),
+            ctypes.c_void_p(remote_addr),
             0,          # Run immediately
             ctypes.byref(thread_id),
         )
@@ -336,11 +447,16 @@ def eject_dll(pid: int, dll_name: str) -> bool:
         return False
 
     try:
-        hKernel32 = kernel32.GetModuleHandleA(b"kernel32.dll")
-        free_library_addr = kernel32.GetProcAddress(hKernel32, b"FreeLibrary")
-
-        if not free_library_addr:
-            print("[!] GetProcAddress(FreeLibrary) failed")
+        # Resolve FreeLibrary in target's kernel32 (cross-arch safe)
+        free_library_addr = find_remote_function(
+            hProcess, pid, "KERNEL32.DLL", "FreeLibrary"
+        )
+        if free_library_addr is None:
+            free_library_addr = find_remote_function(
+                hProcess, pid, "kernel32.dll", "FreeLibrary"
+            )
+        if free_library_addr is None:
+            print("[!] Could not resolve FreeLibrary in target")
             return False
 
         print("[*] Creating remote thread for FreeLibrary...")
@@ -348,8 +464,8 @@ def eject_dll(pid: int, dll_name: str) -> bool:
         hThread = kernel32.CreateRemoteThread(
             hProcess,
             None, 0,
-            free_library_addr,
-            target_base,
+            ctypes.c_void_p(free_library_addr),
+            ctypes.c_void_p(target_base),
             0,
             ctypes.byref(thread_id),
         )

@@ -25,6 +25,70 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "user32.lib")
 
+/* ─── Debug Log ───────────────────────────────────────────────── */
+
+static HANDLE g_logfile = INVALID_HANDLE_VALUE;
+static CRITICAL_SECTION g_log_lock;
+
+static void log_init(HMODULE hModule)
+{
+    char path[MAX_PATH];
+    DWORD len;
+
+    InitializeCriticalSection(&g_log_lock);
+
+    /* Write log next to the DLL */
+    len = GetModuleFileNameA(hModule, path, MAX_PATH);
+    if (len > 4) {
+        /* Replace .dll with .log */
+        strcpy(path + len - 4, ".log");
+    } else {
+        strcpy(path, "C:\\phantom_hook.log");
+    }
+
+    g_logfile = CreateFileA(
+        path, GENERIC_WRITE, FILE_SHARE_READ,
+        NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL
+    );
+}
+
+static void log_write(const char *fmt, ...)
+{
+    char buf[1024];
+    va_list ap;
+    DWORD written;
+    int n;
+    DWORD tick;
+
+    if (g_logfile == INVALID_HANDLE_VALUE)
+        return;
+
+    tick = GetTickCount();
+
+    EnterCriticalSection(&g_log_lock);
+
+    n = sprintf(buf, "[%08u] ", tick);
+    va_start(ap, fmt);
+    n += vsprintf(buf + n, fmt, ap);
+    va_end(ap);
+    buf[n++] = '\r';
+    buf[n++] = '\n';
+
+    WriteFile(g_logfile, buf, n, &written, NULL);
+    FlushFileBuffers(g_logfile);
+
+    LeaveCriticalSection(&g_log_lock);
+}
+
+static void log_close(void)
+{
+    if (g_logfile != INVALID_HANDLE_VALUE) {
+        CloseHandle(g_logfile);
+        g_logfile = INVALID_HANDLE_VALUE;
+    }
+    DeleteCriticalSection(&g_log_lock);
+}
+
 /* ─── Globals ─────────────────────────────────────────────────── */
 
 /* Original function pointers */
@@ -51,8 +115,38 @@ static CRITICAL_SECTION g_pipe_lock;
  * Create named pipe server. The Python logger connects as a client.
  * If the pipe already exists (previous inject), we connect to the existing one.
  */
+static volatile BOOL g_pipe_connected = FALSE;
+
+/**
+ * Background thread: waits for Python logger to connect to the pipe.
+ * ConnectNamedPipe is blocking, so we can't do it in DllMain.
+ * Once connected, pipe_write_packet will start delivering data.
+ */
+static DWORD WINAPI pipe_wait_thread(LPVOID param)
+{
+    (void)param;
+    log_write("pipe_wait_thread: waiting for client...");
+
+    if (ConnectNamedPipe(g_pipe, NULL)) {
+        g_pipe_connected = TRUE;
+        log_write("pipe_wait_thread: client connected!");
+    } else {
+        DWORD err = GetLastError();
+        if (err == ERROR_PIPE_CONNECTED) {
+            /* Client already connected before we called ConnectNamedPipe */
+            g_pipe_connected = TRUE;
+            log_write("pipe_wait_thread: client was already connected");
+        } else {
+            log_write("pipe_wait_thread: ConnectNamedPipe failed (err=%u)", err);
+        }
+    }
+    return 0;
+}
+
 static void pipe_init(void)
 {
+    HANDLE hThread;
+
     g_pipe = CreateNamedPipeA(
         GE_PIPE_NAME,
         PIPE_ACCESS_OUTBOUND,           /* DLL writes, Python reads */
@@ -64,8 +158,14 @@ static void pipe_init(void)
         NULL                            /* Default security */
     );
 
-    if (g_pipe == INVALID_HANDLE_VALUE) {
-        /* Pipe might already exist from a previous injection — try as client */
+    if (g_pipe != INVALID_HANDLE_VALUE) {
+        log_write("pipe: created server pipe OK (handle=%p)", g_pipe);
+        /* Start background thread to wait for client connection */
+        hThread = CreateThread(NULL, 0, pipe_wait_thread, NULL, 0, NULL);
+        if (hThread) CloseHandle(hThread);
+    } else {
+        DWORD err = GetLastError();
+        log_write("pipe: CreateNamedPipe failed (err=%u), trying as client...", err);
         g_pipe = CreateFileA(
             GE_PIPE_NAME,
             GENERIC_WRITE,
@@ -73,6 +173,12 @@ static void pipe_init(void)
             OPEN_EXISTING,
             0, NULL
         );
+        if (g_pipe != INVALID_HANDLE_VALUE) {
+            g_pipe_connected = TRUE;
+            log_write("pipe: connected as client OK");
+        } else {
+            log_write("pipe: FAILED to connect as client (err=%u)", GetLastError());
+        }
     }
 }
 
@@ -86,7 +192,7 @@ static void pipe_write_packet(BYTE direction, const char *buf, int len)
     BYTE header[PIPE_HEADER_SIZE];
     int log_len;
 
-    if (g_pipe == INVALID_HANDLE_VALUE)
+    if (g_pipe == INVALID_HANDLE_VALUE || !g_pipe_connected)
         return;
 
     /* Check if logging is enabled */
@@ -122,9 +228,23 @@ static void pipe_write_packet(BYTE direction, const char *buf, int len)
     EnterCriticalSection(&g_pipe_lock);
 
     /* Write header + payload atomically */
-    WriteFile(g_pipe, header, PIPE_HEADER_SIZE, &written, NULL);
-    if (written == PIPE_HEADER_SIZE) {
-        WriteFile(g_pipe, buf, log_len, &written, NULL);
+    {
+        static volatile LONG pipe_write_count = 0;
+        BOOL ok1, ok2 = FALSE;
+        DWORD written2 = 0;
+        LONG pwc;
+
+        ok1 = WriteFile(g_pipe, header, PIPE_HEADER_SIZE, &written, NULL);
+        if (ok1 && written == PIPE_HEADER_SIZE) {
+            ok2 = WriteFile(g_pipe, buf, log_len, &written2, NULL);
+        }
+
+        pwc = InterlockedIncrement(&pipe_write_count);
+        if (pwc <= 10 || (pwc % 1000 == 0)) {
+            log_write("pipe_write #%d: dir=%d len=%d ok1=%d ok2=%d w1=%u w2=%u err=%u",
+                pwc, direction, log_len, ok1, ok2, written, written2,
+                (!ok1 || !ok2) ? GetLastError() : 0);
+        }
     }
 
     LeaveCriticalSection(&g_pipe_lock);
@@ -161,7 +281,15 @@ static void shmem_init(void)
 
 static int WSAAPI hooked_send(SOCKET s, const char *buf, int len, int flags)
 {
-    InterlockedIncrement(&g_send_count);
+    LONG n = InterlockedIncrement(&g_send_count);
+
+    /* Log first few sends to debug file */
+    if (n <= 5) {
+        log_write("hooked_send #%d: len=%d first4=[%02X %02X %02X %02X]",
+            n, len,
+            len > 0 ? (BYTE)buf[0] : 0, len > 1 ? (BYTE)buf[1] : 0,
+            len > 2 ? (BYTE)buf[2] : 0, len > 3 ? (BYTE)buf[3] : 0);
+    }
 
     /* Log the plaintext packet BEFORE it hits the real send */
     pipe_write_packet(DIR_C2S, buf, len);
@@ -178,7 +306,13 @@ static int WSAAPI hooked_recv(SOCKET s, char *buf, int len, int flags)
     result = g_orig_recv(s, buf, len, flags);
 
     if (result > 0) {
-        InterlockedIncrement(&g_recv_count);
+        LONG n = InterlockedIncrement(&g_recv_count);
+        if (n <= 5) {
+            log_write("hooked_recv #%d: len=%d first4=[%02X %02X %02X %02X]",
+                n, result,
+                result > 0 ? (BYTE)buf[0] : 0, result > 1 ? (BYTE)buf[1] : 0,
+                result > 2 ? (BYTE)buf[2] : 0, result > 3 ? (BYTE)buf[3] : 0);
+        }
         pipe_write_packet(DIR_S2C, buf, result);
     }
 
@@ -279,15 +413,23 @@ static BOOL install_hooks(void)
     void *real_send, *real_recv;
     BOOL ok_send, ok_recv;
 
-    if (!hWs2 || !hExe)
+    log_write("install_hooks: WS2_32=%p ge.exe=%p", hWs2, hExe);
+
+    if (!hWs2 || !hExe) {
+        log_write("install_hooks: FAILED — module handle NULL");
         return FALSE;
+    }
 
     /* Get the real addresses of send/recv from WS2_32 */
     real_send = (void *)GetProcAddress(hWs2, "send");
     real_recv = (void *)GetProcAddress(hWs2, "recv");
 
-    if (!real_send || !real_recv)
+    log_write("install_hooks: real_send=%p real_recv=%p", real_send, real_recv);
+
+    if (!real_send || !real_recv) {
+        log_write("install_hooks: FAILED — GetProcAddress returned NULL");
         return FALSE;
+    }
 
     /* Hook send() in ge.exe's IAT */
     ok_send = iat_hook(
@@ -303,10 +445,11 @@ static BOOL install_hooks(void)
         (void **)&g_orig_recv
     );
 
-    /* If IAT lookup by address failed, try by name thunk (ordinal import) */
+    log_write("install_hooks: IAT send=%s recv=%s",
+        ok_send ? "OK" : "FAIL", ok_recv ? "OK" : "FAIL");
+
+    /* If IAT lookup by address failed, store real function for detour fallback */
     if (!ok_send) {
-        /* Fallback: scan all thunks looking for WS2_32 ordinal #19 (send) */
-        /* For now, store the real function as fallback */
         g_orig_send = (void *)real_send;
     }
 
@@ -433,23 +576,33 @@ static int WSAAPI detour_recv(SOCKET s, char *buf, int len, int flags)
 static BOOL install_detour_hooks(void)
 {
     HMODULE hWs2 = GetModuleHandleA("WS2_32.dll");
-    BOOL ok;
+    BOOL ok_send, ok_recv;
 
-    if (!hWs2)
+    if (!hWs2) {
+        log_write("detour: WS2_32 not found");
         return FALSE;
+    }
 
     g_send_real_addr = (void *)GetProcAddress(hWs2, "send");
     g_recv_real_addr = (void *)GetProcAddress(hWs2, "recv");
+
+    log_write("detour: send=%p recv=%p", g_send_real_addr, g_recv_real_addr);
 
     if (!g_send_real_addr || !g_recv_real_addr)
         return FALSE;
 
     InitializeCriticalSection(&g_detour_lock);
 
-    ok  = inline_hook(g_send_real_addr, detour_send, g_send_orig_bytes);
-    ok &= inline_hook(g_recv_real_addr, detour_recv, g_recv_orig_bytes);
+    ok_send = inline_hook(g_send_real_addr, detour_send, g_send_orig_bytes);
+    ok_recv = inline_hook(g_recv_real_addr, detour_recv, g_recv_orig_bytes);
 
-    return ok;
+    log_write("detour: send=%s recv=%s",
+        ok_send ? "OK" : "FAIL", ok_recv ? "OK" : "FAIL");
+    log_write("detour: send orig bytes=[%02X %02X %02X %02X %02X]",
+        g_send_orig_bytes[0], g_send_orig_bytes[1], g_send_orig_bytes[2],
+        g_send_orig_bytes[3], g_send_orig_bytes[4]);
+
+    return (ok_send && ok_recv);
 }
 
 static void remove_detour_hooks(void)
@@ -473,30 +626,45 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
     switch (reason) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hModule);
+
+        /* Debug log first — everything else depends on this */
+        log_init(hModule);
+        log_write("=== phantom_hook DLL_PROCESS_ATTACH ===");
+        log_write("DLL base=%p, ge.exe base=%p", hModule, GetModuleHandleA(NULL));
+
         InitializeCriticalSection(&g_pipe_lock);
 
         /* Initialize shared memory for control flags */
         shmem_init();
+        log_write("shmem: ctl=%p flags=0x%02X", g_ctl, g_ctl ? g_ctl[0] : 0);
 
         /* Initialize named pipe */
         pipe_init();
 
         /* Try IAT hook first (cleanest approach) */
         if (!install_hooks()) {
+            log_write("IAT hook failed, trying inline detour...");
             /* IAT hook failed — fall back to inline detour */
             if (install_detour_hooks()) {
                 g_using_detour = TRUE;
+                log_write("using DETOUR hooks");
             } else {
                 /* Both methods failed */
-                OutputDebugStringA("[phantom_hook] FATAL: All hook methods failed\n");
+                log_write("FATAL: All hook methods failed!");
+                log_close();
                 return FALSE;  /* Refuse to load */
             }
+        } else {
+            log_write("using IAT hooks");
         }
 
-        OutputDebugStringA("[phantom_hook] Hooks installed successfully\n");
+        log_write("=== hooks installed, ready ===");
         break;
 
     case DLL_PROCESS_DETACH:
+        log_write("=== DLL_PROCESS_DETACH === send=%d recv=%d",
+            g_send_count, g_recv_count);
+
         /* Clean up hooks */
         if (g_using_detour) {
             remove_detour_hooks();
@@ -521,8 +689,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         }
 
         DeleteCriticalSection(&g_pipe_lock);
-
-        OutputDebugStringA("[phantom_hook] Hooks removed, DLL detaching\n");
+        log_write("cleanup done, goodbye");
+        log_close();
         break;
     }
 
