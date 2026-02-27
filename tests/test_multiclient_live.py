@@ -102,12 +102,14 @@ def _combat_data(entity_id: int, sub_index: int = 0) -> bytes:
     return bytes(buf)
 
 
-def _player_position(entity_id: int, x: float = 100.0, y: float = 200.0) -> bytes:
-    buf = bytearray(23)
-    buf[0], buf[1] = 0x5d, 0x0c
+def _player_position(entity_id: int, x: int = 100, y: int = 200) -> bytes:
+    """Build a 15-byte PLAYER_MOVE (0x7b00) packet."""
+    buf = bytearray(15)
+    buf[0], buf[1] = 0x7b, 0x00
     struct.pack_into("<I", buf, 2, entity_id)
-    struct.pack_into("<d", buf, 6, x)
-    struct.pack_into("<d", buf, 14, y)
+    struct.pack_into("<i", buf, 6, x)
+    struct.pack_into("<i", buf, 10, y)
+    buf[14] = 0  # state
     return bytes(buf)
 
 
@@ -516,8 +518,8 @@ class TestFullSessionSimulation:
         # ---- Client B: Zone 7, picking up items ----
         # Player positions
         pp_batch = (
-            _player_position(2000, x=100.5, y=200.5) +
-            _player_position(2001, x=300.5, y=400.5)
+            _player_position(2000, x=100, y=200) +
+            _player_position(2001, x=300, y=400)
         )
         router.process_packet(_s2c_pkt(pp_batch, PORT_B, ts)); ts += 0.1
 

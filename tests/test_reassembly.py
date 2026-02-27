@@ -118,7 +118,7 @@ def _make_combat_footer() -> bytes:
 
 
 def _make_player_position(entity_id: int = 1, x: float = 100.0, y: float = 200.0) -> bytes:
-    """Build a 23-byte PLAYER_POSITION (0x5d0c) with f64 coordinates."""
+    """Build a 23-byte ENTITY_STATE_F64 (0x5d0c) with f64 values."""
     buf = bytearray(23)
     buf[0] = 0x5d
     buf[1] = 0x0c
@@ -517,7 +517,7 @@ class TestCombatDataReassembly:
 
 
 class TestPlayerPositionReassembly:
-    """Test PLAYER_POSITION (0x5d0c) fixed 23-byte reassembly."""
+    """Test ENTITY_STATE_F64 (0x5d0c) fixed 23-byte reassembly."""
 
     def _make_reassembler(self) -> tuple[TCPStreamReassembler, list]:
         r = TCPStreamReassembler()
@@ -590,19 +590,14 @@ class TestPlayerPositionReassembly:
         assert results[0][1] == pp
 
     def test_player_position_updates_state(self):
-        """PLAYER_POSITION updates entity state through router."""
+        """ENTITY_STATE_F64 (0x5d0c) decodes through router (no longer sets player position)."""
         router = ClientRouter()
         pp = _make_player_position(entity_id=42, x=1000.5, y=2000.5)
         pkt = _make_pkt("S2C", pp)
         key, decoded = router.process_packet(pkt)
 
         assert decoded is not None
-        assert decoded["name"] == "PLAYER_POSITION"
-        session = router.clients[key]
-        assert 42 in session.state.entities
-        ent = session.state.entities[42]
-        assert ent.entity_type == "player"
-        assert ent.x == 1000  # int conversion from f64
+        assert decoded["name"] == "ENTITY_STATE_F64"
 
 
 class TestItemEventReassembly:

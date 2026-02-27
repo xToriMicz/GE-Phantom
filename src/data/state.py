@@ -178,8 +178,9 @@ class RadarState:
             match name:
                 case "ENTITY_POSITION":
                     self._handle_position(decoded, pkt.timestamp)
-                case "PLAYER_POSITION":
-                    self._handle_player_position(decoded, pkt.timestamp)
+                case "PLAYER_MOVE" | "PLAYER_MOVE_B" | "PLAYER_MOVE_C" \
+                        | "PLAYER_MOVE_D" | "PLAYER_MOVE_E" | "PLAYER_MOVE_F":
+                    self._handle_player_move(decoded, pkt.timestamp)
                 case "ITEM_DROP":
                     self._handle_item_drop(decoded, pkt.timestamp)
                 case "ENTITY_DESPAWN":
@@ -243,8 +244,8 @@ class RadarState:
 
         self._notify("position", d)
 
-    def _handle_player_position(self, d: dict, ts: float) -> None:
-        """Handle PLAYER_POSITION — uses f64 coordinates."""
+    def _handle_player_move(self, d: dict, ts: float) -> None:
+        """Handle PLAYER_MOVE — i32 coordinates in same space as ENTITY_POSITION."""
         eid = d.get("entity_id", 0)
         if not eid:
             return
@@ -252,13 +253,12 @@ class RadarState:
         if not ent:
             ent = Entity(entity_id=eid, entity_type="player")
             self.entities[eid] = ent
-        # PLAYER_POSITION uses f64, convert to int for consistency
         x = d.get("x")
         y = d.get("y")
         if x is not None:
-            ent.x = int(x)
+            ent.x = x
         if y is not None:
-            ent.y = int(y)
+            ent.y = y
         ent.entity_type = "player"
         ent.last_seen = ts
         # Track player position for distance calculations

@@ -5,7 +5,7 @@
 
 ## Overview
 
-- **61 registered opcodes** (42 confirmed, 19 pending additional captures)
+- **78 registered opcodes** (51 confirmed, 27 pending additional captures)
 - **Header**: 2-byte opcode (big-endian) + 2-byte field (varies)
 - **Direction**: S2C (server-to-client, plaintext) and C2S (client-to-server, encrypted payload)
 - **Framing**: Fixed-size (49), length-field variable (5), unknown framing (7)
@@ -36,7 +36,7 @@ The largest family. Handles entity lifecycle, movement, combat, and world state.
 | 0x580c | ENTITY_LABEL | var | Y | Entity name string (length field @ [2:4]) |
 | 0x5a0c | ENTITY_STAT_HEADER | 10 | Y | Pairs with ENTITY_STAT (0x530d) |
 | 0x5c0c | ENTITY_DATA | 270 | Y | Entity detailed data block (sparse template) |
-| 0x5d0c | PLAYER_POSITION | 23 | Y | Player position using f64 coordinates |
+| 0x5d0c | ENTITY_STATE_F64 | 23 | Y | Entity state data (f64 values, NOT position) |
 | 0x5f0c | ENTITY_LINK | 24 | Y | Entity link/association |
 | 0x620c | COMBAT_EFFECT | 44 | Y | Combat effect with damage display |
 | 0x630c | ENTITY_SYNC | 14 | Y | Entity sync/update |
@@ -120,6 +120,12 @@ Character profile and inventory data.
 | 0xfbee | SYSTEM_BLOCK_A | 268 | - | System data block A (twin of 0x6cf1) |
 | 0x7400 | SKILL_EFFECT_NAME | var | - | Skill name with f0-delimiters |
 | 0x1900 | SERVER_RESPONSE | var | - | Response after ACK (session5 only) |
+| 0x7b00 | PLAYER_MOVE | 15 | Y | Player/entity position update (primary) |
+| 0xab00 | PLAYER_MOVE_B | 15 | Y | Player/entity position update (variant B) |
+| 0xdb00 | PLAYER_MOVE_C | 15 | Y | Player/entity position update (variant C) |
+| 0xa000 | PLAYER_MOVE_D | 15 | Y | Player/entity position update (variant D) |
+| 0xd000 | PLAYER_MOVE_E | 15 | Y | Player/entity position update (variant E) |
+| 0xf500 | PLAYER_MOVE_F | 15 | - | Player/entity position update (variant F, rare) |
 
 ### C2S — Client to Server (2 opcodes, encrypted)
 
@@ -173,8 +179,9 @@ TARGET_LINK → COMBAT_UPDATE → COMBAT_DATA (1-3x) → COMBAT_FOOTER → EFFEC
 ### Position Coordinate Types
 
 - **Entity positions** (0x560c): i32 signed integers
-- **Player positions** (0x5d0c): f64 doubles (higher precision)
+- **Player move** (0x7b00, 0xab00, 0xdb00, 0xa000, 0xd000, 0xf500): i32 same coord space as entity positions
 - **Movement paths** (0x6b0c, 0x6d0c): i32 with state byte (30=idle, 81=walk, 119=run)
+- **Entity state** (0x5d0c): f64 values — NOT position data despite similar structure
 
 ## Coverage by Capture
 

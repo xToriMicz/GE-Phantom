@@ -140,8 +140,8 @@ def test_get_packet_size_combat_footer_fixed():
     assert get_packet_size(b"\x00\x0c\x19\x00") == 25
 
 
-def test_get_packet_size_player_position_fixed():
-    """PLAYER_POSITION (0x5d0c) is now confirmed fixed at 23 bytes."""
+def test_get_packet_size_entity_state_f64_fixed():
+    """ENTITY_STATE_F64 (0x5d0c) is now confirmed fixed at 23 bytes."""
     assert get_packet_size(b"\x5d\x0c\x00\x00") == 23
 
 

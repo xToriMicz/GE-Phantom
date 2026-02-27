@@ -201,15 +201,15 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
 
     0x5d0c: PacketDef(
         opcode=0x5d0c,
-        name="PLAYER_POSITION",
+        name="ENTITY_STATE_F64",
         direction=Direction.S2C,
         size=23,  # confirmed fixed — 46=2x23, 69=3x23 were TCP-coalesced
-        description="Player character position using f64 coordinates",
+        description="Entity state data (f64 values, NOT position). Flag 0x00=player, 0x01=other",
         fields=[
-            FieldDef("entity_id", 2, 4, "u32le", "Player entity ID"),
-            FieldDef("x", 6, 8, "f64", "X coordinate (double)"),
-            FieldDef("y", 14, 8, "f64", "Y coordinate (double)"),
-            FieldDef("flags", 22, 1, "u8", "Movement/state flags"),
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("value_a", 6, 8, "f64", "State value A (unknown purpose)"),
+            FieldDef("value_b", 14, 8, "f64", "State value B (unknown purpose)"),
+            FieldDef("entity_flag", 22, 1, "u8", "Entity type flag (0=player, 1=other)"),
         ],
         confirmed=True,
     ),
@@ -984,6 +984,98 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         direction=Direction.S2C,
         size=None,  # variable: 1092b — large system data block
         description="Large system data block (1092 bytes, contains entity refs)",
+        confirmed=False,
+    ),
+
+    # ---- Player/entity movement (15-byte position packets, same coord space as ENTITY_POSITION) ----
+
+    0x7b00: PacketDef(
+        opcode=0x7b00,
+        name="PLAYER_MOVE",
+        direction=Direction.S2C,
+        size=15,  # chain-validated 538x in live_test_03
+        description="Player/entity position update (primary, ~1.2/sec per entity)",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("x", 6, 4, "i32le", "X coordinate"),
+            FieldDef("y", 10, 4, "i32le", "Y coordinate"),
+            FieldDef("state", 14, 1, "u8", "Movement state"),
+        ],
+        confirmed=True,
+    ),
+
+    0xab00: PacketDef(
+        opcode=0xab00,
+        name="PLAYER_MOVE_B",
+        direction=Direction.S2C,
+        size=15,  # chain-validated 122x
+        description="Player/entity position update (variant B)",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("x", 6, 4, "i32le", "X coordinate"),
+            FieldDef("y", 10, 4, "i32le", "Y coordinate"),
+            FieldDef("state", 14, 1, "u8", "Movement state"),
+        ],
+        confirmed=True,
+    ),
+
+    0xdb00: PacketDef(
+        opcode=0xdb00,
+        name="PLAYER_MOVE_C",
+        direction=Direction.S2C,
+        size=15,  # chain-validated 59x
+        description="Player/entity position update (variant C)",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("x", 6, 4, "i32le", "X coordinate"),
+            FieldDef("y", 10, 4, "i32le", "Y coordinate"),
+            FieldDef("state", 14, 1, "u8", "Movement state"),
+        ],
+        confirmed=True,
+    ),
+
+    0xa000: PacketDef(
+        opcode=0xa000,
+        name="PLAYER_MOVE_D",
+        direction=Direction.S2C,
+        size=15,  # chain-validated 15x
+        description="Player/entity position update (variant D, less frequent)",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("x", 6, 4, "i32le", "X coordinate"),
+            FieldDef("y", 10, 4, "i32le", "Y coordinate"),
+            FieldDef("state", 14, 1, "u8", "Movement state"),
+        ],
+        confirmed=True,
+    ),
+
+    0xd000: PacketDef(
+        opcode=0xd000,
+        name="PLAYER_MOVE_E",
+        direction=Direction.S2C,
+        size=15,  # chain-validated 4x
+        description="Player/entity position update (variant E, rare)",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("x", 6, 4, "i32le", "X coordinate"),
+            FieldDef("y", 10, 4, "i32le", "Y coordinate"),
+            FieldDef("state", 14, 1, "u8", "Movement state"),
+        ],
+        confirmed=True,
+    ),
+
+    0xf500: PacketDef(
+        opcode=0xf500,
+        name="PLAYER_MOVE_F",
+        direction=Direction.S2C,
+        size=15,  # chain-validated 1x (rare)
+        description="Player/entity position update (variant F, very rare)",
+        fields=[
+            FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
+            FieldDef("x", 6, 4, "i32le", "X coordinate"),
+            FieldDef("y", 10, 4, "i32le", "Y coordinate"),
+            FieldDef("state", 14, 1, "u8", "Movement state"),
+        ],
         confirmed=False,
     ),
 }

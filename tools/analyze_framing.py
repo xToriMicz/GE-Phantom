@@ -22,7 +22,7 @@ CAPTURES_DIR = Path(__file__).parent.parent / "captures"
 # Opcodes we want to investigate
 INVESTIGATE = {
     0xa50c: "COMBAT_DATA",
-    0x5d0c: "PLAYER_POSITION",
+    0x5d0c: "ENTITY_STATE_F64",
     0x4b0c: "ITEM_EVENT",
     0x330e: "EFFECT_DATA",
 }
