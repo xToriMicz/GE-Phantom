@@ -43,11 +43,15 @@
 #define GE_TEXT_END              0x00B6B000   /* approximate .text end */
 #define GE_RDATA_BASE           0x00B6B000
 
-/* Known string addresses in .rdata */
-#define GE_STR_SET_PROP_NUM     0x00BAD84C   /* "SetPropertyNumber" */
-#define GE_STR_GET_PROP_NUM     0x00BE18C8   /* "GetPropertyNumber" */
-#define GE_STR_SPL_RANGE        0x00B9A564   /* "SplRange" */
-#define GE_STR_KEEP_RANGE       0x00B80F70   /* "KeepRange" */
+/* Known string addresses in .rdata (verified via runtime memory scan) */
+#define GE_STR_SET_PROP_NUM     0x00BAF04C   /* "SetPropertyNumber" */
+#define GE_STR_GET_PROP_NUM     0x00BE30C8   /* "GetPropertyNumber" */
+#define GE_STR_SPL_RANGE        0x00B9BD64   /* "SplRange" */
+#define GE_STR_KEEP_RANGE       0x00B82770   /* "KeepRange" */
+
+/* Resolved function addresses (from tolua++ registration xrefs) */
+#define GE_FUNC_SET_PROP_NUM    0x006C6449   /* SetPropertyNumber C++ function */
+#define GE_FUNC_GET_PROP_NUM    0x008ABD73   /* GetPropertyNumber C++ function */
 
 /* ─── Phase 2: Command Interface ─────────────────────────────── */
 
@@ -90,6 +94,8 @@
 #define CMD_GET_PROP            0x02   /* GetPropertyNumber(param1=idSpace, str=propName) */
 #define CMD_SET_PROP            0x03   /* SetPropertyNumber(param1=idSpace, str=propName, f64=value) */
 #define CMD_READ_ADDR           0x10   /* Read 4 bytes from param1 address → result_i32 */
+#define CMD_SET_FUNC_ADDR       0x11   /* Set function addr: param1=addr, param2=0=get/1=set */
+#define CMD_FIND_STRING         0x12   /* Find string in .rdata: str_param=needle → result_i32=addr */
 #define CMD_PING                0xFE   /* Ping → status=done, result_i32=0xDEADBEEF */
 
 /* Status codes (written by DLL to offset 0x01) */
@@ -116,17 +122,21 @@
 /* ─── Property Function Typedefs ─────────────────────────────── */
 
 /*
- * tolua++ registered functions typically use lua_State* as first param.
- * But the actual C++ functions behind them may have signatures like:
+ * Actual C++ function signatures (determined from disassembly of tolua++ wrappers):
  *
- *   double GetPropertyNumber(int idSpace, const char* objName, const char* propName);
- *   void   SetPropertyNumber(int idSpace, const char* objName, const char* propName, double value);
+ * GetPropertyNumber at 0x0089D5FC:
+ *   Called from tolua wrapper at 0x008ABD73 with: PUSH propName, PUSH idSpace, PUSH objName
+ *   Returns double via FPU ST(0) register
  *
- * We'll determine the exact signature from disassembly around xrefs.
- * These typedefs are initial guesses — may need adjustment after scan.
+ * SetPropertyNumber at 0x005C62A2:
+ *   Called from tolua wrapper at 0x006C6449
+ *   Takes objName, idSpace, propName, double value
+ *
+ * The tolua wrappers themselves (0x006C6449, 0x008ABD73) take lua_State* —
+ * we call the underlying C++ functions directly instead.
  */
-typedef double (__cdecl *fn_GetPropertyNumber)(int idSpace, const char *objName, const char *propName);
-typedef void   (__cdecl *fn_SetPropertyNumber)(int idSpace, const char *objName, const char *propName, double value);
+typedef double (__cdecl *fn_GetPropertyNumber)(const char *objName, int idSpace, const char *propName);
+typedef void   (__cdecl *fn_SetPropertyNumber)(const char *objName, int idSpace, const char *propName, double value);
 
 /* Known property names to probe */
 #define PROP_SPL_RANGE      "SplRange"

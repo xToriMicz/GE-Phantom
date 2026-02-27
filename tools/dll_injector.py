@@ -112,6 +112,7 @@ class PROCESS_INFORMATION(ctypes.Structure):
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 psapi    = ctypes.WinDLL("psapi", use_last_error=True)
+ntdll    = ctypes.WinDLL("ntdll", use_last_error=True)
 
 # ── Helper Functions ───────────────────────────────────────────
 
@@ -240,6 +241,154 @@ def read_process_memory(hProcess, address: int, size: int) -> bytes | None:
     if not ok or read.value == 0:
         return None
     return buf.raw[:read.value]
+
+
+def find_kernel32_via_peb(hProcess, hThread) -> int | None:
+    """
+    Find kernel32.dll base in a 32-bit SUSPENDED process from 64-bit Python.
+    Uses NtQueryInformationProcess to read the WoW64 PEB, then walks
+    the PEB_LDR_DATA module list.
+
+    This works even when the process is suspended because the PEB and
+    initial module list are populated by the kernel before any user code runs.
+    """
+    # For WoW64: use NtQueryInformationProcess with ProcessWow64Information (26)
+    # to get the 32-bit PEB address. On 64-bit Windows, this returns a
+    # ULONG_PTR (8 bytes) containing the 32-bit PEB address.
+    peb32_addr = ctypes.c_ulonglong(0)
+    status = ntdll.NtQueryInformationProcess(
+        hProcess,
+        26,  # ProcessWow64Information
+        ctypes.byref(peb32_addr),
+        ctypes.sizeof(peb32_addr),
+        None
+    )
+    if status != 0 or peb32_addr.value == 0:
+        print(f"[!] NtQueryInformationProcess(Wow64) failed: status=0x{status & 0xFFFFFFFF:08X}")
+        return None
+
+    peb_addr = peb32_addr.value
+    print(f"[*] WoW64 PEB at 0x{peb_addr:08X}")
+
+    # Read PEB32.Ldr (at offset 0x0C in 32-bit PEB)
+    peb_data = read_process_memory(hProcess, peb_addr, 0x10)
+    if not peb_data:
+        print("[!] Failed to read PEB")
+        return None
+
+    ldr_addr = struct.unpack_from("<I", peb_data, 0x0C)[0]
+    if ldr_addr == 0:
+        print("[!] PEB.Ldr is NULL")
+        return None
+
+    print(f"[*] PEB_LDR_DATA at 0x{ldr_addr:08X}")
+
+    # Read PEB_LDR_DATA.InLoadOrderModuleList.Flink (offset 0x0C)
+    ldr_data = read_process_memory(hProcess, ldr_addr, 0x14)
+    if not ldr_data:
+        print("[!] Failed to read LDR_DATA")
+        return None
+
+    head = struct.unpack_from("<I", ldr_data, 0x0C)[0]
+    current = head
+
+    # Walk the InLoadOrderModuleList (up to 50 entries)
+    for _ in range(50):
+        # Each LDR_DATA_TABLE_ENTRY32:
+        # +0x00 InLoadOrderLinks.Flink
+        # +0x04 InLoadOrderLinks.Blink
+        # +0x18 DllBase
+        # +0x2C BaseDllName (UNICODE_STRING: +0x00=Length, +0x02=MaxLength, +0x04=Buffer)
+        entry_data = read_process_memory(hProcess, current, 0x38)
+        if not entry_data:
+            break
+
+        flink = struct.unpack_from("<I", entry_data, 0x00)[0]
+        dll_base = struct.unpack_from("<I", entry_data, 0x18)[0]
+
+        # Read the BaseDllName UNICODE_STRING
+        name_len = struct.unpack_from("<H", entry_data, 0x2C)[0]
+        name_buf_ptr = struct.unpack_from("<I", entry_data, 0x30)[0]
+
+        if name_len > 0 and name_buf_ptr != 0 and name_len < 512:
+            name_data = read_process_memory(hProcess, name_buf_ptr, name_len)
+            if name_data:
+                try:
+                    dll_name = name_data.decode("utf-16-le").lower()
+                    if "kernel32" in dll_name:
+                        print(f"[*] Found kernel32.dll at 0x{dll_base:08X}")
+                        return dll_base
+                except UnicodeDecodeError:
+                    pass
+
+        if flink == head or flink == 0:
+            break
+        current = flink
+
+    print("[!] kernel32.dll not found in PEB module list")
+    return None
+
+
+def find_loadlibrary_from_peb(hProcess, hThread, pid: int) -> int | None:
+    """
+    Find LoadLibraryA in the target SUSPENDED process by:
+    1. Walking the PEB to find kernel32.dll base
+    2. Reading kernel32's PE export table for LoadLibraryA
+    """
+    k32_base = find_kernel32_via_peb(hProcess, hThread)
+    if k32_base is None:
+        return None
+
+    # Now walk the PE export table (same as find_remote_function but with known base)
+    dos = read_process_memory(hProcess, k32_base, 64)
+    if not dos or len(dos) < 64:
+        return None
+
+    magic = struct.unpack_from("<H", dos, 0)[0]
+    if magic != 0x5A4D:
+        return None
+
+    e_lfanew = struct.unpack_from("<I", dos, 0x3C)[0]
+    nt = read_process_memory(hProcess, k32_base + e_lfanew, 248)
+    if not nt or len(nt) < 248:
+        return None
+
+    export_rva = struct.unpack_from("<I", nt, 0x78)[0]
+    if export_rva == 0:
+        return None
+
+    export_dir = read_process_memory(hProcess, k32_base + export_rva, 40)
+    if not export_dir or len(export_dir) < 40:
+        return None
+
+    num_names      = struct.unpack_from("<I", export_dir, 24)[0]
+    addr_table_rva = struct.unpack_from("<I", export_dir, 28)[0]
+    name_table_rva = struct.unpack_from("<I", export_dir, 32)[0]
+    ord_table_rva  = struct.unpack_from("<I", export_dir, 36)[0]
+
+    name_ptrs = read_process_memory(hProcess, k32_base + name_table_rva, num_names * 4)
+    ordinals  = read_process_memory(hProcess, k32_base + ord_table_rva, num_names * 2)
+    if not name_ptrs or not ordinals:
+        return None
+
+    target_name = b"LoadLibraryA"
+    for i in range(num_names):
+        name_rva = struct.unpack_from("<I", name_ptrs, i * 4)[0]
+        name_bytes = read_process_memory(hProcess, k32_base + name_rva, 64)
+        if not name_bytes:
+            continue
+        name_str = name_bytes.split(b"\x00")[0]
+        if name_str == target_name:
+            ordinal = struct.unpack_from("<H", ordinals, i * 2)[0]
+            func_rva_data = read_process_memory(
+                hProcess, k32_base + addr_table_rva + ordinal * 4, 4
+            )
+            if not func_rva_data:
+                return None
+            func_rva = struct.unpack_from("<I", func_rva_data, 0)[0]
+            return k32_base + func_rva
+
+    return None
 
 
 def find_remote_function(hProcess, pid: int, dll_name: str, func_name: str) -> int | None:
@@ -569,15 +718,35 @@ def launch_and_inject(exe_path: str, dll_path: str, working_dir: str | None = No
         # Inject DLL while process is suspended
         dll_bytes = dll_path.encode("ascii") + b"\x00"
 
-        # Find LoadLibraryA in the target process
-        print("[*] Resolving LoadLibraryA in target process...")
-        load_library_addr = find_remote_function(
-            pi.hProcess, pid, "KERNEL32.DLL", "LoadLibraryA"
+        # 64-bit Python can't use CreateToolhelp32Snapshot on a 32-bit
+        # SUSPENDED process (error 299). Instead, walk the PEB directly
+        # to find kernel32 and resolve LoadLibraryA — works even while
+        # the main thread is suspended because the kernel populates the
+        # PEB module list before any user code runs.
+        print("[*] Resolving LoadLibraryA via PEB (process SUSPENDED)...")
+        load_library_addr = find_loadlibrary_from_peb(
+            pi.hProcess, pi.hThread, pid
         )
+
+        # Fallback: resume the process fully, wait for initialization,
+        # then inject into the running process (no re-suspend to avoid
+        # loader lock issues that cause LoadLibraryA to return NULL)
         if load_library_addr is None:
+            import time
+            print("[*] PEB walk failed. Resuming process for full init...")
+            kernel32.ResumeThread(pi.hThread)
+            time.sleep(3)  # Let process fully initialize
+            print("[*] Trying module snapshot on running process...")
             load_library_addr = find_remote_function(
-                pi.hProcess, pid, "kernel32.dll", "LoadLibraryA"
+                pi.hProcess, pid, "KERNEL32.DLL", "LoadLibraryA"
             )
+            if load_library_addr is None:
+                load_library_addr = find_remote_function(
+                    pi.hProcess, pid, "kernel32.dll", "LoadLibraryA"
+                )
+            # Process is now running — no need to resume at the end
+            # We'll skip the final ResumeThread below
+
         if load_library_addr is None:
             print("[!] Could not resolve LoadLibraryA — terminating process")
             kernel32.TerminateProcess(pi.hProcess, 1)
@@ -601,8 +770,8 @@ def launch_and_inject(exe_path: str, dll_path: str, working_dir: str | None = No
             len(dll_bytes), ctypes.byref(written),
         )
 
-        # Create remote thread to load DLL (process is still suspended, but remote threads can run)
-        print("[*] Injecting DLL into suspended process...")
+        # Create remote thread to load DLL
+        print("[*] Injecting DLL...")
         thread_id = wt.DWORD(0)
         hThread = kernel32.CreateRemoteThread(
             pi.hProcess, None, 0,
@@ -627,21 +796,31 @@ def launch_and_inject(exe_path: str, dll_path: str, working_dir: str | None = No
 
         if exit_code.value == 0:
             print("[!] LoadLibraryA returned NULL — DLL failed to load")
-            print("[!] Terminating suspended process")
+            # Get last error from the remote process for debugging
+            print("    Possible causes:")
+            print("    - DLL has missing dependencies (CRT DLLs)")
+            print("    - Loader lock held by initializing process")
+            print("    - Anti-cheat blocked the load")
+            print("[!] Terminating process")
             kernel32.TerminateProcess(pi.hProcess, 1)
             return False
 
         print(f"[+] DLL loaded! HMODULE = 0x{exit_code.value:08X}")
 
-        # Resume the main thread — game starts with our hooks already in place
+        # Resume the main thread if still suspended
+        # (If PEB walk worked, the main thread was never resumed)
         print("[*] Resuming main thread...")
         result = kernel32.ResumeThread(pi.hThread)
         if result == -1:
-            print(f"[!] ResumeThread failed: {ctypes.get_last_error()}")
-            return False
+            err = ctypes.get_last_error()
+            if err != 0:
+                print(f"[!] ResumeThread failed: {err}")
+        elif result == 0:
+            print(f"[*] Thread was already running")
+        else:
+            print(f"[+] Thread resumed (prev suspend count: {result})")
 
-        print(f"[+] Process resumed — game starting with hooks active")
-        print(f"[+] PID: {pid}")
+        print(f"[+] Game starting with hooks active — PID: {pid}")
         print(f"[*] Check phantom_hook.log for xref scan results")
         return True
 

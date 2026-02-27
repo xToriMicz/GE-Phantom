@@ -811,17 +811,18 @@ static double call_get_property(int idSpace, const char *objName, const char *pr
         return -9999.0;
     }
 
-    log_write("call_get_property(%d, \"%s\", \"%s\") @ 0x%08X",
-        idSpace, objName ? objName : "(null)", propName,
+    log_write("call_get_property(obj=\"%s\", id=%d, prop=\"%s\") @ 0x%08X",
+        objName ? objName : "(null)", idSpace, propName,
         (DWORD)(DWORD_PTR)g_fn_get_prop);
 
     __try {
-        result = g_fn_get_prop(idSpace, objName, propName);
-        log_write("  → result = %f", result);
+        /* New signature: double GetPropertyNumber(objName, idSpace, propName) */
+        result = g_fn_get_prop(objName, idSpace, propName);
+        log_write("  -> result = %f", result);
         return result;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        log_write("  → EXCEPTION 0x%08X!", GetExceptionCode());
+        log_write("  -> EXCEPTION 0x%08X!", GetExceptionCode());
         return -9999.0;
     }
 }
@@ -837,17 +838,18 @@ static BOOL call_set_property(int idSpace, const char *objName, const char *prop
         return FALSE;
     }
 
-    log_write("call_set_property(%d, \"%s\", \"%s\", %f) @ 0x%08X",
-        idSpace, objName ? objName : "(null)", propName, value,
+    log_write("call_set_property(obj=\"%s\", id=%d, prop=\"%s\", val=%f) @ 0x%08X",
+        objName ? objName : "(null)", idSpace, propName, value,
         (DWORD)(DWORD_PTR)g_fn_set_prop);
 
     __try {
-        g_fn_set_prop(idSpace, objName, propName, value);
-        log_write("  → OK");
+        /* New signature: void SetPropertyNumber(objName, idSpace, propName, value) */
+        g_fn_set_prop(objName, idSpace, propName, value);
+        log_write("  -> OK");
         return TRUE;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        log_write("  → EXCEPTION 0x%08X!", GetExceptionCode());
+        log_write("  -> EXCEPTION 0x%08X!", GetExceptionCode());
         return FALSE;
     }
 }
@@ -966,6 +968,85 @@ static void process_command(void)
         __except (EXCEPTION_EXECUTE_HANDLER) {
             log_write("  → ACCESS VIOLATION!");
             mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+        }
+        break;
+    }
+
+    case CMD_SET_FUNC_ADDR:
+    {
+        DWORD addr = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
+        DWORD which = *(volatile DWORD *)(mem + CMD_OFF_PARAM2);
+        log_write("CMD: SET_FUNC_ADDR which=%u addr=0x%08X", which, addr);
+
+        if (which == 0) {
+            g_fn_get_prop = (fn_GetPropertyNumber)addr;
+            log_write("  → GetPropertyNumber = 0x%08X", addr);
+        } else if (which == 1) {
+            g_fn_set_prop = (fn_SetPropertyNumber)addr;
+            log_write("  → SetPropertyNumber = 0x%08X", addr);
+        } else {
+            log_write("  → unknown which=%u", which);
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+            break;
+        }
+
+        /* Return current addresses in result fields */
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = addr;
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+    }
+
+    case CMD_FIND_STRING:
+    {
+        char needle[64];
+        DWORD search_start, search_end;
+        BYTE *p;
+        int needle_len;
+        DWORD param2 = *(volatile DWORD *)(mem + CMD_OFF_PARAM2);
+
+        memcpy(needle, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
+        needle[63] = '\0';
+        needle_len = (int)strlen(needle);
+
+        /* param1 = start addr hint (0 = .rdata default), param2 = nth match (0=first) */
+        search_start = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
+        if (search_start == 0) search_start = GE_RDATA_BASE;
+        search_end = 0x00C50000;  /* well past .rdata end */
+
+        log_write("CMD: FIND_STRING \"%s\" (len=%d) range=0x%08X-0x%08X nth=%u",
+            needle, needle_len, search_start, search_end, param2);
+
+        {
+            DWORD match_count = 0;
+            DWORD found_addr = 0;
+
+            for (p = (BYTE *)search_start; p < (BYTE *)search_end - needle_len; p++) {
+                if (memcmp(p, needle, needle_len) == 0) {
+                    DWORD addr = (DWORD)(DWORD_PTR)p;
+                    log_write("  FIND: \"%s\" at 0x%08X (match #%u)", needle, addr, match_count);
+                    if (match_count == param2) {
+                        found_addr = addr;
+                    }
+                    match_count++;
+                }
+            }
+
+            *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = found_addr;
+            *(volatile DWORD *)(mem + CMD_OFF_PARAM2) = match_count;
+
+            if (found_addr) {
+                log_write("  → returning 0x%08X (%u total matches)", found_addr, match_count);
+                /* Also write result as string for convenience */
+                {
+                    char result[96];
+                    sprintf(result, "0x%08X (%u matches)", found_addr, match_count);
+                    memcpy((void *)(mem + CMD_OFF_STR_RESULT), result, strlen(result) + 1);
+                }
+                mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+            } else {
+                log_write("  → not found (%u partial matches)", match_count);
+                mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+            }
         }
         break;
     }
@@ -1094,6 +1175,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         /* Phase 2: Run xref scan immediately on attach */
         log_write("Phase 2: running initial xref scan...");
         scan_xrefs();
+
+        /* Phase 2: Set resolved function addresses */
+        set_function_addresses(GE_FUNC_GET_PROP_NUM, GE_FUNC_SET_PROP_NUM);
 
         /* Phase 2: Start command poll thread */
         cmd_start();

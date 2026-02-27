@@ -47,8 +47,10 @@ CMD_NOP         = 0x00
 CMD_SCAN        = 0x01
 CMD_GET_PROP    = 0x02
 CMD_SET_PROP    = 0x03
-CMD_READ_ADDR   = 0x10
-CMD_PING        = 0xFE
+CMD_READ_ADDR       = 0x10
+CMD_SET_FUNC_ADDR   = 0x11
+CMD_FIND_STRING     = 0x12
+CMD_PING            = 0xFE
 
 # Status
 STATUS_IDLE     = 0x00
@@ -69,10 +71,19 @@ KNOWN_PROPS = [
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
+# Set correct return types for 64-bit Python (default c_int truncates pointers)
+kernel32.OpenFileMappingA.restype = wt.HANDLE
+kernel32.MapViewOfFile.restype = ctypes.c_void_p
+kernel32.MapViewOfFile.argtypes = [
+    wt.HANDLE, wt.DWORD, wt.DWORD, wt.DWORD, ctypes.c_size_t
+]
+kernel32.UnmapViewOfFile.argtypes = [ctypes.c_void_p]
+kernel32.UnmapViewOfFile.restype = wt.BOOL
+
 FILE_MAP_ALL_ACCESS = 0x000F001F
 
 
-def open_shmem() -> mmap.mmap | None:
+def open_shmem() -> tuple | None:
     """Open the shared memory created by phantom_hook DLL."""
     # Use Win32 OpenFileMappingA to get handle
     handle = kernel32.OpenFileMappingA(
@@ -216,6 +227,25 @@ class PhantomCmd:
             return self._read_u32(OFF_RESULT_I32)
         return None
 
+    def set_func_addr(self, which: int, address: int) -> bool:
+        """Set a function address in the DLL. which: 0=GetPropertyNumber, 1=SetPropertyNumber."""
+        self._write_u32(OFF_PARAM1, address)
+        self._write_u32(OFF_PARAM2, which)
+        status = self._send_cmd(CMD_SET_FUNC_ADDR)
+        return status == STATUS_DONE
+
+    def find_string(self, needle: str, start: int = 0, nth: int = 0) -> tuple[int, int]:
+        """Find a string in ge.exe memory. Returns (address, total_matches) or (0, 0) on failure."""
+        self._write_u32(OFF_PARAM1, start)
+        self._write_u32(OFF_PARAM2, nth)
+        self._write_str(OFF_STR_PARAM, needle)
+        status = self._send_cmd(CMD_FIND_STRING, timeout=30.0)
+        if status == STATUS_DONE:
+            addr = self._read_u32(OFF_RESULT_I32)
+            count = self._read_u32(OFF_PARAM2)
+            return addr, count
+        return 0, 0
+
 
 # ── CLI Commands ──────────────────────────────────────────────
 
@@ -284,6 +314,22 @@ def cmd_read(args):
             return 1
 
 
+def cmd_setaddr(args):
+    which = 0 if args.which == "get" else 1
+    name = "GetPropertyNumber" if which == 0 else "SetPropertyNumber"
+    addr_str = args.address
+    addr = int(addr_str, 16) if addr_str.startswith("0x") else int(addr_str)
+
+    with PhantomCmd() as cmd:
+        print(f"[*] Setting {name} = 0x{addr:08X}")
+        if cmd.set_func_addr(which, addr):
+            print(f"[+] {name} address set successfully")
+            return 0
+        else:
+            print(f"[!] Failed to set {name} address")
+            return 1
+
+
 def cmd_probe(args):
     """Probe all known range properties."""
     id_space = args.id_space
@@ -327,6 +373,9 @@ def cmd_interactive(args):
     print("  get <prop> [id] [obj] — Get property value")
     print("  set <prop> <val> [id] [obj] — Set property value")
     print("  read <hex_addr>      — Read 4 bytes from address")
+    print("  setaddr get <hex>    — Set GetPropertyNumber address")
+    print("  setaddr set <hex>    — Set SetPropertyNumber address")
+    print("  find <string> [start_hex] — Find string in memory")
     print("  probe [id] [obj]     — Probe all known range properties")
     print("  quit                 — Exit")
     print()
@@ -404,6 +453,38 @@ def cmd_interactive(args):
                 else:
                     print(f"  (error reading 0x{addr:08X})")
 
+            elif verb == "find":
+                if len(parts) < 2:
+                    print("Usage: find <string> [start_hex]")
+                    continue
+                needle = parts[1]
+                start = int(parts[2], 16) if len(parts) > 2 and parts[2].startswith("0x") else 0
+                addr, count = cmd.find_string(needle, start)
+                if addr:
+                    print(f"  \"{needle}\" found at 0x{addr:08X} ({count} total matches)")
+                else:
+                    print(f"  \"{needle}\" not found")
+
+            elif verb == "setaddr":
+                if len(parts) < 3:
+                    print("Usage: setaddr get|set <hex_address>")
+                    continue
+                which_str = parts[1].lower()
+                addr_str = parts[2]
+                addr = int(addr_str, 16) if addr_str.startswith("0x") else int(addr_str)
+                if which_str == "get":
+                    which = 0
+                elif which_str == "set":
+                    which = 1
+                else:
+                    print("Usage: setaddr get|set <hex_address>")
+                    continue
+                name = "GetPropertyNumber" if which == 0 else "SetPropertyNumber"
+                if cmd.set_func_addr(which, addr):
+                    print(f"  {name} = 0x{addr:08X}")
+                else:
+                    print(f"  (error setting {name})")
+
             elif verb == "probe":
                 id_s = int(parts[1]) if len(parts) > 1 else 0
                 obj = parts[2] if len(parts) > 2 else ""
@@ -459,6 +540,13 @@ def main():
     p_read = sub.add_parser("read", help="Read memory address")
     p_read.add_argument("address", help="Address (hex with 0x prefix)")
     p_read.set_defaults(func=cmd_read)
+
+    # setaddr
+    p_setaddr = sub.add_parser("setaddr", help="Set function address in DLL")
+    p_setaddr.add_argument("which", choices=["get", "set"],
+                           help="Which function: get=GetPropertyNumber, set=SetPropertyNumber")
+    p_setaddr.add_argument("address", help="Function address (hex with 0x prefix)")
+    p_setaddr.set_defaults(func=cmd_setaddr)
 
     # probe
     p_probe = sub.add_parser("probe", help="Probe all known range properties")
