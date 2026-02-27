@@ -53,6 +53,8 @@
 /* tolua wrappers: Get=0x008ABD73, Set=0x006C6449 — these take lua_State*, don't call directly */
 #define GE_FUNC_GET_PROP_NUM    0x0089D5FC   /* GetPropertyNumber: double __cdecl (objName, idSpace, propName) */
 #define GE_FUNC_SET_PROP_NUM    0x005C62A2   /* SetPropertyNumber: void __cdecl (objName, idSpace, propName, value) */
+#define GE_FUNC_CHAT_INTERNAL   0x004FAB43   /* void __cdecl (const char*) — Chat: sends to server + local */
+#define GE_FUNC_SYSMSG_INTERNAL 0x0050C6F8   /* void __cdecl (const char*) — SysMsg: local system message */
 
 /* ─── Phase 2: Command Interface ─────────────────────────────── */
 
@@ -106,6 +108,8 @@
 #define CMD_UNHOOK_VTABLE_GET   0x32   /* Remove vtable GET hook */
 #define CMD_SET_VTGET_OVERRIDE  0x33   /* Set override value for vtable GET (f64), param1=0 off/1 on */
 #define CMD_VTGET_STATUS        0x34   /* Read hook stats → result_i32=count, f64=last_value, str=info */
+#define CMD_CHAT                0x40   /* Chat(str_param) → sends to server + local display */
+#define CMD_SYSMSG              0x41   /* SysMsg(str_param) → local system message display */
 #define CMD_PING                0xFE   /* Ping → status=done, result_i32=0xDEADBEEF */
 
 /* Status codes (written by DLL to offset 0x01) */
@@ -147,6 +151,8 @@
  */
 typedef double (__cdecl *fn_GetPropertyNumber)(const char *objName, int idSpace, const char *propName);
 typedef void   (__cdecl *fn_SetPropertyNumber)(const char *objName, int idSpace, const char *propName, double value);
+typedef void   (__cdecl *fn_ChatInternal)(const char *text);
+typedef void   (__cdecl *fn_SysMsgInternal)(const char *text);
 
 /* ─── Phase 3: VTable Call Sites (from xref scan) ────────── */
 
@@ -164,10 +170,34 @@ typedef void   (__cdecl *fn_SetPropertyNumber)(const char *objName, int idSpace,
  *
  * ESI = character object, EDI = vtable ptr (after 004FEA50)
  */
-#define GE_KEEPRANGE_SPY_SITE    0x004FEA4B   /* push "KeepRange" — 5 bytes, spy target */
+#define GE_KEEPRANGE_SPY_SITE    0x004FEA4B   /* push "KeepRange" — 5 bytes, spy target (xref #1, getter) */
 #define GE_KEEPRANGE_SPY_RESUME  0x004FEA50   /* instruction after push */
 #define GE_KEEPRANGE_GET_SITE    0x004FEA58   /* mov ecx,esi; call [edi+0x10] — 5 bytes */
 #define GE_KEEPRANGE_GET_RESUME  0x004FEA5D   /* instruction after vtable call */
+
+/*
+ * KeepRange SET call site at 0x0050A942 (xref #2):
+ *
+ *   0050A933: 0F E6 C0        cvtdq2pd xmm0, xmm0   ; int → double
+ *   0050A936: 51              push ecx               ; \
+ *   0050A937: 51              push ecx               ; / reserve 8 bytes for double
+ *   0050A938: 8B 3E           mov edi, [esi]         ; vtable (loaded BEFORE push!)
+ *   0050A93A: 8D 4D FC        lea ecx, [ebp-4]
+ *   0050A93D: F2 0F 11 04 24  movsd [esp], xmm0      ; store double value on stack
+ *   0050A942: 68 70 27 B8 00  push "KeepRange"       ← SPY HOOK (5 bytes)
+ *   0050A947: E8 A6 D0 0D 00  call resolve_string
+ *   0050A94C: 50              push eax               ; prop_id
+ *   0050A94D: 8B CE           mov ecx, esi           ; this
+ *   0050A94F: FF 57 28        call [edi+0x28]        ; vtable SET (offset 0x28, not 0x10!)
+ *   0050A952: 5F 5E C9 C3    pop edi; pop esi; leave; ret
+ *
+ * Key differences from xref #1:
+ *   - EDI = vtable is ALREADY loaded (before the push)
+ *   - Double value lives on stack at [ESP] (the value being SET)
+ *   - Uses vtable[0x28] (setter) not vtable[0x10] (getter)
+ */
+#define GE_KEEPRANGE_SET_SITE    0x0050A942   /* push "KeepRange" — 5 bytes, xref #2 (setter) */
+#define GE_KEEPRANGE_SET_RESUME  0x0050A947   /* instruction after push */
 
 /* Known property names to probe */
 #define PROP_SPL_RANGE      "SplRange"

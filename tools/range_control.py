@@ -59,6 +59,8 @@ CMD_HOOK_VTABLE_GET     = 0x31
 CMD_UNHOOK_VTABLE_GET   = 0x32
 CMD_SET_VTGET_OVERRIDE  = 0x33
 CMD_VTGET_STATUS        = 0x34
+CMD_CHAT            = 0x40
+CMD_SYSMSG          = 0x41
 CMD_PING            = 0xFE
 
 # Status
@@ -281,17 +283,23 @@ class PhantomCmd:
 
     # ── Phase 3: VTable Spy & Hook ─────────────────────────────
 
-    def vtable_spy(self) -> dict | None:
-        """Install one-shot vtable spy. Waits up to 30s for game to read KeepRange.
-        Returns dict with obj_ptr, vtable_get, vtable_set, info string, or None on failure."""
+    def vtable_spy(self, site: int = 1) -> dict | None:
+        """Install one-shot vtable spy. Waits up to 30s for trigger.
+        site=1: xref #1 (getter, 0x004FEA4B) — original behavior
+        site=2: xref #2 (setter, 0x0050A942) — captures double value being SET
+        Returns dict with obj_ptr, vtable_get, vtable_set, info, and set_value (site 2)."""
+        self._write_u32(OFF_PARAM1, site)
         status = self._send_cmd(CMD_VTABLE_SPY, timeout=35.0)
         if status == STATUS_DONE:
-            return {
+            result = {
                 "obj_ptr": self._read_u32(OFF_RESULT_I32),
                 "vtable_get": self._read_u32(OFF_PARAM1),
                 "vtable_set": self._read_u32(OFF_PARAM2),
                 "info": self._read_str(OFF_STR_RESULT),
             }
+            if site == 2:
+                result["set_value"] = self._read_f64(OFF_RESULT_F64)
+            return result
         return None
 
     def hook_vtable_get(self) -> bool:
@@ -325,6 +333,20 @@ class PhantomCmd:
                 "info": self._read_str(OFF_STR_RESULT),
             }
         return None
+
+    # ── Phase 4: Chat / SysMsg ────────────────────────────────
+
+    def chat(self, message: str) -> bool:
+        """Send a chat message via Chat_internal (sends to server + local display)."""
+        self._write_str(OFF_STR_PARAM, message)
+        status = self._send_cmd(CMD_CHAT)
+        return status == STATUS_DONE
+
+    def sysmsg(self, message: str) -> bool:
+        """Display a local system message via SysMsg_internal."""
+        self._write_str(OFF_STR_PARAM, message)
+        status = self._send_cmd(CMD_SYSMSG)
+        return status == STATUS_DONE
 
 
 # ── CLI Commands ──────────────────────────────────────────────
@@ -461,8 +483,12 @@ def cmd_interactive(args):
     print("  unhook               — Remove GetPropertyNumber hook")
     print("  hookset              — Hook SetPropertyNumber (log all game calls)")
     print("  unhookset            — Remove SetPropertyNumber hook")
+    print("  --- Phase 4: Chat/SysMsg ---")
+    print("  chat <message>           — Send chat message (server + local)")
+    print("  sysmsg <message>         — Display local system message")
     print("  --- Phase 3: VTable ---")
-    print("  spy                  — One-shot vtable spy (wait for KeepRange read)")
+    print("  spy                  — One-shot vtable spy at xref #1 (getter)")
+    print("  spy2                 — One-shot vtable spy at xref #2 (SETTER site)")
     print("  hookvt               — Hook vtable GET at KeepRange call site")
     print("  unhookvt             — Remove vtable GET hook")
     print("  override <value>     — Set override value for KeepRange GET")
@@ -614,12 +640,37 @@ def cmd_interactive(args):
                     else:
                         print(f"    {prop:20s} = (error)")
 
+            # ── Phase 4: Chat/SysMsg commands ────────────────
+
+            elif verb == "chat":
+                if len(parts) < 2:
+                    print("Usage: chat <message>")
+                    continue
+                message = " ".join(parts[1:])
+                print(f"[*] Chat: \"{message}\"")
+                if cmd.chat(message):
+                    print("[+] Chat sent")
+                else:
+                    print("[!] Chat failed")
+
+            elif verb == "sysmsg":
+                if len(parts) < 2:
+                    print("Usage: sysmsg <message>")
+                    continue
+                message = " ".join(parts[1:])
+                print(f"[*] SysMsg: \"{message}\"")
+                if cmd.sysmsg(message):
+                    print("[+] SysMsg displayed")
+                else:
+                    print("[!] SysMsg failed")
+
             # ── Phase 3: VTable commands ──────────────────────
 
             elif verb == "spy":
-                print("[*] Installing vtable spy... (waiting up to 30s for KeepRange read)")
+                print("[*] Installing vtable spy at xref #1 (getter)...")
+                print("    Waiting up to 30s for KeepRange read.")
                 print("    Play the game, move characters, or open skill info to trigger it.")
-                result = cmd.vtable_spy()
+                result = cmd.vtable_spy(site=1)
                 if result:
                     print(f"[+] VTable spy captured!")
                     print(f"    Object ptr:  0x{result['obj_ptr']:08X}")
@@ -628,6 +679,21 @@ def cmd_interactive(args):
                     print(f"    Info: {result['info']}")
                 else:
                     print("[!] Spy timed out — game didn't read KeepRange")
+
+            elif verb == "spy2":
+                print("[*] Installing vtable spy at xref #2 (SETTER site, 0x0050A942)...")
+                print("    Waiting up to 30s for KeepRange WRITE.")
+                print("    Try: change stance, equip weapon, enter combat, use skill.")
+                result = cmd.vtable_spy(site=2)
+                if result:
+                    print(f"[+] VTable spy2 captured!")
+                    print(f"    Object ptr:  0x{result['obj_ptr']:08X}")
+                    print(f"    VTable GET:  0x{result['vtable_get']:08X}")
+                    print(f"    VTable SET:  0x{result['vtable_set']:08X}")
+                    print(f"    Set value:   {result.get('set_value', 'N/A')}")
+                    print(f"    Info: {result['info']}")
+                else:
+                    print("[!] Spy2 timed out — game didn't write KeepRange via xref #2")
 
             elif verb == "hookvt":
                 if cmd.hook_vtable_get():

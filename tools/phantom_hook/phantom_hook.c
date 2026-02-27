@@ -121,6 +121,10 @@ static volatile BYTE *g_cmd = NULL;
 static fn_GetPropertyNumber g_fn_get_prop = NULL;
 static fn_SetPropertyNumber g_fn_set_prop = NULL;
 
+/* Chat/SysMsg internal function pointers (hardcoded addresses from disassembly) */
+static fn_ChatInternal  g_fn_chat   = (fn_ChatInternal)GE_FUNC_CHAT_INTERNAL;
+static fn_SysMsgInternal g_fn_sysmsg = (fn_SysMsgInternal)GE_FUNC_SYSMSG_INTERNAL;
+
 /* Flag: pending game-thread command (GET_PROP/SET_PROP must run on main thread) */
 static volatile BYTE g_mainthread_cmd = CMD_NOP;
 
@@ -355,6 +359,48 @@ static void try_execute_mainthread_cmd(void)
 
         ok = call_set_property(idSpace, objName[0] ? objName : NULL, propName, value);
         mem[CMD_OFF_STATUS] = ok ? CMD_STATUS_DONE : CMD_STATUS_ERROR;
+        break;
+    }
+
+    case CMD_CHAT:
+    {
+        char text[64];
+        memcpy(text, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
+        text[63] = '\0';
+
+        log_write("MAIN_THREAD CMD: CHAT text=\"%s\" fn=0x%08X",
+            text, (DWORD)(DWORD_PTR)g_fn_chat);
+
+        __try {
+            g_fn_chat(text);
+            log_write("  -> CHAT OK");
+            mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            log_write("  -> CHAT EXCEPTION 0x%08X!", GetExceptionCode());
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+        }
+        break;
+    }
+
+    case CMD_SYSMSG:
+    {
+        char text[64];
+        memcpy(text, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
+        text[63] = '\0';
+
+        log_write("MAIN_THREAD CMD: SYSMSG text=\"%s\" fn=0x%08X",
+            text, (DWORD)(DWORD_PTR)g_fn_sysmsg);
+
+        __try {
+            g_fn_sysmsg(text);
+            log_write("  -> SYSMSG OK");
+            mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            log_write("  -> SYSMSG EXCEPTION 0x%08X!", GetExceptionCode());
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+        }
         break;
     }
 
@@ -1100,7 +1146,13 @@ static volatile BOOL  g_spy_armed = FALSE;
 static volatile BOOL  g_spy_done = FALSE;
 static volatile LONG  g_spy_trigger_count = 0;
 static BYTE g_spy_orig_bytes[5];
+static BYTE g_spy2_orig_bytes[5];     /* separate saved bytes for xref #2 */
 static volatile BOOL g_spy_installed = FALSE;
+static volatile int  g_spy_site = 0;  /* which site: 0=none, 1=xref#1, 2=xref#2 */
+
+/* Additional captures for xref #2 (setter — carries a double value) */
+static volatile DWORD g_spy_set_val_lo = 0;
+static volatile DWORD g_spy_set_val_hi = 0;
 
 /* Logging helper callable from asm */
 static void __cdecl spy_log_capture(DWORD obj, DWORD vtable, DWORD get_fn, DWORD set_fn)
@@ -1168,41 +1220,160 @@ __declspec(naked) static void __cdecl vtable_spy_cave(void)
     }
 }
 
-static BOOL install_vtable_spy(void)
+/**
+ * Code cave for xref #2 (setter site) — entered via JMP from 0x0050A942.
+ *
+ * At entry: ESI = character object, EDI = vtable (already loaded!),
+ *           [ESP] = double value being SET (8 bytes on stack).
+ */
+static void __cdecl spy_log_capture2(DWORD obj, DWORD vtable, DWORD get_fn, DWORD set_fn,
+                                     DWORD val_lo, DWORD val_hi)
 {
+    double val;
+    memcpy(&val, &val_lo, 4);
+    memcpy((char *)&val + 4, &val_hi, 4);
+    log_write("VTABLE_SPY(xref2): obj=0x%08X vtable=0x%08X get=0x%08X set=0x%08X set_value=%.6f",
+        obj, vtable, get_fn, set_fn, val);
+}
+
+__declspec(naked) static void __cdecl vtable_spy_cave2(void)
+{
+    __asm {
+        /* Save all registers + flags */
+        pushad
+        pushfd
+
+        /* Always count triggers */
+        lock inc g_spy_trigger_count
+
+        /* Only capture when armed */
+        cmp g_spy_armed, 1
+        jne _spy2_skip
+
+        /* At xref #2: ESI = object, EDI = vtable (already loaded before push) */
+        mov g_spy_obj_ptr, esi
+        mov g_spy_vtable, edi
+
+        /* Read vtable[0x10] = getter function */
+        mov eax, [edi + 0x10]
+        mov g_spy_vtable_get, eax
+
+        /* Read vtable[0x28] = setter function */
+        mov ecx, [edi + 0x28]
+        mov g_spy_vtable_set, ecx
+
+        /* Read double from original stack.
+         * pushad = 32 bytes, pushfd = 4 bytes → original ESP at [ESP + 36]
+         * The double was stored at [original_ESP] by movsd [esp], xmm0 */
+        mov edx, [esp + 36]
+        mov g_spy_set_val_lo, edx
+        mov edx, [esp + 40]
+        mov g_spy_set_val_hi, edx
+
+        /* Log the capture */
+        push g_spy_set_val_hi
+        push g_spy_set_val_lo
+        push ecx
+        push eax
+        push edi
+        push esi
+        call spy_log_capture2
+        add esp, 24
+
+        /* Signal done, disarm */
+        mov g_spy_armed, 0
+        mov g_spy_done, 1
+
+    _spy2_skip:
+        /* Restore all registers + flags */
+        popfd
+        popad
+
+        /* Execute original instruction: push 0x00B82770 ("KeepRange") */
+        push 0x00B82770
+
+        /* Return to 0x0050A947 (instruction after the replaced push) */
+        push 0x0050A947
+        ret
+    }
+}
+
+/* Forward declaration — install needs to call remove when switching sites */
+static void remove_vtable_spy(void);
+
+static BOOL install_vtable_spy(int site)
+{
+    DWORD hook_addr;
+    BYTE *orig_bytes;
+    void *cave;
+
     if (g_spy_installed) {
-        log_write("vtable_spy: already installed, re-arming");
-        g_spy_done = FALSE;
-        g_spy_armed = TRUE;
-        return TRUE;
+        if (g_spy_site == site) {
+            log_write("vtable_spy: already installed at site %d, re-arming", site);
+            g_spy_done = FALSE;
+            g_spy_armed = TRUE;
+            return TRUE;
+        }
+        /* Different site requested — remove old one first */
+        remove_vtable_spy();
+    }
+
+    /* Select site parameters */
+    if (site == 1) {
+        hook_addr = GE_KEEPRANGE_SPY_SITE;
+        orig_bytes = g_spy_orig_bytes;
+        cave = vtable_spy_cave;
+    } else if (site == 2) {
+        hook_addr = GE_KEEPRANGE_SET_SITE;
+        orig_bytes = g_spy2_orig_bytes;
+        cave = vtable_spy_cave2;
+    } else {
+        log_write("vtable_spy: invalid site %d", site);
+        return FALSE;
     }
 
     g_spy_done = FALSE;
     g_spy_armed = TRUE;
     g_spy_trigger_count = 0;
+    g_spy_set_val_lo = 0;
+    g_spy_set_val_hi = 0;
 
-    if (inline_hook((void *)GE_KEEPRANGE_SPY_SITE, vtable_spy_cave, g_spy_orig_bytes)) {
+    if (inline_hook((void *)hook_addr, cave, orig_bytes)) {
         g_spy_installed = TRUE;
-        log_write("vtable_spy: INSTALLED at 0x%08X (orig: %02X %02X %02X %02X %02X)",
-            GE_KEEPRANGE_SPY_SITE,
-            g_spy_orig_bytes[0], g_spy_orig_bytes[1], g_spy_orig_bytes[2],
-            g_spy_orig_bytes[3], g_spy_orig_bytes[4]);
+        g_spy_site = site;
+        log_write("vtable_spy: INSTALLED site %d at 0x%08X (orig: %02X %02X %02X %02X %02X)",
+            site, hook_addr,
+            orig_bytes[0], orig_bytes[1], orig_bytes[2],
+            orig_bytes[3], orig_bytes[4]);
         return TRUE;
     }
 
-    log_write("vtable_spy: FAILED to install");
+    log_write("vtable_spy: FAILED to install at site %d", site);
     return FALSE;
 }
 
 static void remove_vtable_spy(void)
 {
+    DWORD hook_addr;
+    BYTE *orig_bytes;
+
     if (!g_spy_installed)
         return;
 
     g_spy_armed = FALSE;
-    inline_unhook((void *)GE_KEEPRANGE_SPY_SITE, g_spy_orig_bytes);
+
+    if (g_spy_site == 1) {
+        hook_addr = GE_KEEPRANGE_SPY_SITE;
+        orig_bytes = g_spy_orig_bytes;
+    } else {
+        hook_addr = GE_KEEPRANGE_SET_SITE;
+        orig_bytes = g_spy2_orig_bytes;
+    }
+
+    inline_unhook((void *)hook_addr, orig_bytes);
     g_spy_installed = FALSE;
-    log_write("vtable_spy: REMOVED (triggered %d times)", g_spy_trigger_count);
+    log_write("vtable_spy: REMOVED site %d (triggered %d times)", g_spy_site, g_spy_trigger_count);
+    g_spy_site = 0;
 }
 
 /* ─── Phase 3: VTable GET Hook ───────────────────────────────── */
@@ -1384,10 +1555,14 @@ static void process_command(void)
 
     case CMD_GET_PROP:
     case CMD_SET_PROP:
+    case CMD_CHAT:
+    case CMD_SYSMSG:
         /* These must run on the main game thread (via hooked_send/recv).
          * Signal the main thread and leave the command in shared memory. */
         log_write("CMD: %s → deferred to main thread",
-            cmd == CMD_GET_PROP ? "GET_PROP" : "SET_PROP");
+            cmd == CMD_GET_PROP ? "GET_PROP" :
+            cmd == CMD_SET_PROP ? "SET_PROP" :
+            cmd == CMD_CHAT     ? "CHAT"     : "SYSMSG");
         g_mainthread_cmd = cmd;
         /* Don't clear CMD_OFF_COMMAND — main thread will handle it */
         return;
@@ -1528,39 +1703,69 @@ static void process_command(void)
     case CMD_VTABLE_SPY:
     {
         int wait_ms;
-        log_write("CMD: VTABLE_SPY — installing one-shot spy at 0x%08X", GE_KEEPRANGE_SPY_SITE);
+        int site = (int)*(volatile DWORD *)(mem + CMD_OFF_PARAM1);
+        DWORD site_addr;
 
-        if (!install_vtable_spy()) {
+        if (site == 0) site = 1;  /* default to xref #1 for backward compat */
+        site_addr = (site == 2) ? GE_KEEPRANGE_SET_SITE : GE_KEEPRANGE_SPY_SITE;
+
+        log_write("CMD: VTABLE_SPY site=%d — installing one-shot spy at 0x%08X", site, site_addr);
+
+        if (!install_vtable_spy(site)) {
             mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
             break;
         }
 
-        /* Wait up to 30 seconds for the game to read KeepRange */
+        /* Wait up to 30 seconds for trigger */
         for (wait_ms = 0; wait_ms < 30000 && !g_spy_done; wait_ms += 100) {
             Sleep(100);
         }
 
         if (g_spy_done) {
-            log_write("VTABLE_SPY: CAPTURED after %d ms (triggers=%d)", wait_ms, g_spy_trigger_count);
+            log_write("VTABLE_SPY: CAPTURED site=%d after %d ms (triggers=%d)",
+                site, wait_ms, g_spy_trigger_count);
             log_write("  obj_ptr    = 0x%08X", g_spy_obj_ptr);
             log_write("  vtable     = 0x%08X", g_spy_vtable);
             log_write("  vtable_get = 0x%08X (vtable[0x10])", g_spy_vtable_get);
             log_write("  vtable_set = 0x%08X (vtable[0x28])", g_spy_vtable_set);
 
+            if (site == 2) {
+                double set_val;
+                memcpy(&set_val, (void *)&g_spy_set_val_lo, 4);
+                memcpy((char *)&set_val + 4, (void *)&g_spy_set_val_hi, 4);
+                log_write("  set_value  = %.6f (lo=0x%08X hi=0x%08X)",
+                    set_val, g_spy_set_val_lo, g_spy_set_val_hi);
+            }
+
             /* Write results to shared memory */
             *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = g_spy_obj_ptr;
             *(volatile DWORD *)(mem + CMD_OFF_PARAM1)     = g_spy_vtable_get;
             *(volatile DWORD *)(mem + CMD_OFF_PARAM2)     = g_spy_vtable_set;
+
+            /* Write set_value to f64 result for site 2 */
+            if (site == 2) {
+                *(volatile DWORD *)(mem + CMD_OFF_RESULT_F64)     = g_spy_set_val_lo;
+                *(volatile DWORD *)(mem + CMD_OFF_RESULT_F64 + 4) = g_spy_set_val_hi;
+            }
+
             {
                 char result[96];
-                sprintf(result, "obj=0x%08X vt=0x%08X get=0x%08X set=0x%08X",
-                    g_spy_obj_ptr, g_spy_vtable, g_spy_vtable_get, g_spy_vtable_set);
+                if (site == 2) {
+                    double sv;
+                    memcpy(&sv, (void *)&g_spy_set_val_lo, 4);
+                    memcpy((char *)&sv + 4, (void *)&g_spy_set_val_hi, 4);
+                    sprintf(result, "obj=0x%08X vt=0x%08X get=0x%08X set=0x%08X val=%.4f",
+                        g_spy_obj_ptr, g_spy_vtable, g_spy_vtable_get, g_spy_vtable_set, sv);
+                } else {
+                    sprintf(result, "obj=0x%08X vt=0x%08X get=0x%08X set=0x%08X",
+                        g_spy_obj_ptr, g_spy_vtable, g_spy_vtable_get, g_spy_vtable_set);
+                }
                 memcpy((void *)(mem + CMD_OFF_STR_RESULT), result, strlen(result) + 1);
             }
             mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
         } else {
-            log_write("VTABLE_SPY: TIMEOUT — game did not read KeepRange in 30s (triggers=%d)",
-                g_spy_trigger_count);
+            log_write("VTABLE_SPY: TIMEOUT site=%d — game did not trigger in 30s (triggers=%d)",
+                site, g_spy_trigger_count);
             remove_vtable_spy();
             mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
         }
