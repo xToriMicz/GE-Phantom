@@ -727,6 +727,76 @@ class TestImprovedBoundaryScanner:
         assert len(results[1][1]) == 38  # COMBAT_UPDATE
 
 
+class TestChainValidation:
+    """Test chain validation in boundary scanner — two-hop opcode verification."""
+
+    def _make_reassembler(self) -> tuple[TCPStreamReassembler, list]:
+        r = TCPStreamReassembler()
+        r.set_framing("opcode_registry")
+        results = []
+        r.on_game_packet(lambda d, data: results.append((d, data)))
+        return r, results
+
+    def test_chain_validates_next_opcode(self):
+        """Boundary candidate is accepted when followed by another known opcode."""
+        r, results = self._make_reassembler()
+        # NAME_LABEL (unknown framing, 40 bytes) → ENTITY_POSITION (26b) → HEARTBEAT (6b)
+        nl = bytearray(40)
+        nl[0] = 0x66; nl[1] = 0x0e
+        for i in range(2, 40):
+            nl[i] = 0x42  # non-opcode fill
+        ep = _make_entity_position(entity_id=5)
+        hb = _make_heartbeat()
+        merged = bytes(nl) + ep + hb
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 3
+        assert len(results[0][1]) == 40   # NAME_LABEL
+        assert len(results[1][1]) == 26   # ENTITY_POSITION
+        assert len(results[2][1]) == 6    # HEARTBEAT
+
+    def test_false_boundary_rejected_by_chain(self):
+        """Coincidental opcode bytes mid-payload rejected when chain doesn't validate."""
+        r, results = self._make_reassembler()
+        # NAME_LABEL with embedded bytes that look like ENTITY_DESPAWN (0x7a0c, 6b)
+        # at offset 10. But byte[16:18] is not a known opcode, so chain fails.
+        nl = bytearray(80)
+        nl[0] = 0x66; nl[1] = 0x0e
+        # Plant false 0x7a0c at offset 10
+        nl[10] = 0x7a; nl[11] = 0x0c
+        # Fill bytes 12-15 (rest of "despawn") with non-opcode junk
+        nl[12:16] = b"\xfe\xfe\xfe\xfe"
+        # After false despawn (offset 16), put non-opcode bytes
+        nl[16] = 0xaa; nl[17] = 0xbb  # NOT a known opcode
+        # Fill rest with non-opcode bytes
+        for i in range(18, 80):
+            nl[i] = 0x42
+        # Real boundary: COMBAT_UPDATE at offset 80
+        cu = _make_combat_update(entity_id=1)
+        merged = bytes(nl) + cu
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 2
+        assert len(results[0][1]) == 80   # NAME_LABEL (not split at false 0x7a0c)
+        assert len(results[1][1]) == 38   # COMBAT_UPDATE
+
+    def test_chain_validation_at_buffer_end(self):
+        """Candidate at buffer end (no chain data) accepted on framing alone."""
+        r, results = self._make_reassembler()
+        # NAME_LABEL (50b) → ENTITY_POSITION (26b) with no trailing data
+        nl = bytearray(50)
+        nl[0] = 0x66; nl[1] = 0x0e
+        for i in range(2, 50):
+            nl[i] = 0x42
+        ep = _make_entity_position(entity_id=7)
+        merged = bytes(nl) + ep
+
+        r.feed(_make_pkt("S2C", merged))
+        assert len(results) == 2
+        assert len(results[0][1]) == 50
+        assert len(results[1][1]) == 26
+
+
 class TestMixedTypeReassembly:
     """Test complex real-world coalescing patterns."""
 

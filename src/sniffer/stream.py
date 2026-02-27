@@ -181,7 +181,11 @@ class TCPStreamReassembler:
 
         Returns offset of the next opcode, or None if not found.
         Excludes HEARTBEAT (0x0000) from candidates — too many false positives.
-        Validates candidates by checking if they lead to valid packet chains.
+
+        Chain validation: when a candidate has known size, verifies the NEXT
+        packet after it also starts with a known opcode (two-hop validation).
+        This prevents false boundaries from coincidental byte patterns (e.g.
+        `00 xx` sequences that happen to match registered opcodes).
         """
         from src.protocol.packet_types import KNOWN_PACKETS, get_packet_size
 
@@ -198,10 +202,19 @@ class TCPStreamReassembler:
             remaining = bytes(buf[offset:])
             pkt_size = get_packet_size(remaining[:min(len(remaining), 8)])
             if pkt_size is not None:
-                # Strong candidate: we know the next packet's size
                 if pkt_size <= len(remaining):
-                    return offset
-                # Packet is fragmented but opcode is valid — still accept
+                    # Chain validation: check if what follows is also valid
+                    if self._validate_chain(buf, offset, pkt_size):
+                        return offset
+                    # Chain failed but candidate has strong framing — accept
+                    # if chain couldn't be tested (not enough data after)
+                    after_end = offset + pkt_size
+                    if after_end + 2 > len(buf):
+                        # Not enough data to chain-validate — accept on framing alone
+                        return offset
+                    # Chain failed with data available — skip this candidate
+                    continue
+                # Packet is fragmented — can't chain-validate, accept on framing
                 return offset
 
             # Variable-size packet with unknown framing — weaker candidate
@@ -211,6 +224,22 @@ class TCPStreamReassembler:
                 return offset
 
         return None
+
+    @staticmethod
+    def _validate_chain(buf: bytearray, offset: int, pkt_size: int) -> bool:
+        """Check if the packet after candidate also starts with a known opcode.
+
+        Returns True if the chain validates (next bytes are a known opcode),
+        or if there's not enough data to check (gives benefit of doubt).
+        """
+        from src.protocol.packet_types import KNOWN_PACKETS
+
+        after_end = offset + pkt_size
+        if after_end + 2 > len(buf):
+            return True  # Not enough data — can't disprove, accept
+
+        next_opcode = int.from_bytes(buf[after_end:after_end + 2], "big")
+        return next_opcode in KNOWN_PACKETS
 
     def _emit(self, direction: str, data: bytes) -> None:
         stream = self.streams[direction]

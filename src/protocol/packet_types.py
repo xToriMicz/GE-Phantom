@@ -155,12 +155,12 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x400c,
         name="OBJECT_SPAWN",
         direction=Direction.S2C,
-        size=371,  # confirmed — 742=2x371 coalesced
+        size=371,  # confirmed — 742=2x371 coalesced, 9 instances across 2 captures
         description="Object/structure spawn (similar to monster spawn)",
         fields=[
             FieldDef("entity_id", 2, 4, "u32le", "Entity ID"),
         ],
-        confirmed=False,
+        confirmed=True,
     ),
 
     0x7a0c: PacketDef(
@@ -726,13 +726,13 @@ KNOWN_PACKETS: dict[int, PacketDef] = {
         opcode=0x8114,
         name="ENTITY_MARKER",
         direction=Direction.S2C,
-        size=13,  # 1 instance — 0xxx14 entity family, follows HEARTBEAT
+        size=13,  # 3 instances in live_test_01, consistent 13b — 0xxx14 entity family
         description="Entity marker/config (13 bytes, 0xxx14 family)",
         fields=[
             FieldDef("zeros", 2, 6, "bytes", "Padding"),
             FieldDef("value", 8, 4, "u32le", "Marker value"),
         ],
-        confirmed=False,
+        confirmed=True,
     ),
 
     0x005b: PacketDef(
