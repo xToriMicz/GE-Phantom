@@ -1,0 +1,50 @@
+[
+  {
+    "group": 1,
+    "addr": "0x4C903410",
+    "addr_int": 1284518928,
+    "original": 850.0,
+    "test_value": 1200.0,
+    "readback": 1200.0,
+    "after_test": 1200.0,
+    "was_reset": false,
+    "user_confirmed_effect": false,
+    "result": "no_effect"
+  },
+  {
+    "group": 2,
+    "addr": "0x4927A7D0",
+    "addr_int": 1227335632,
+    "original": 850.0,
+    "test_value": 1200.0,
+    "readback": 1200.0,
+    "after_test": 1200.0,
+    "was_reset": false,
+    "user_confirmed_effect": false,
+    "result": "no_effect"
+  },
+  {
+    "group": 3,
+    "addr": "0x4C8BEDB0",
+    "addr_int": 1284238768,
+    "original": 850.0,
+    "test_value": 1200.0,
+    "readback": 1200.0,
+    "after_test": 1200.0,
+    "was_reset": false,
+    "user_confirmed_effect": false,
+    "result": "no_effect"
+  },
+  {
+    "group": 4,
+    "addr": "0x45196E88",
+    "addr_int": 1159294600,
+    "original": 850.0,
+    "test_value": 1200.0,
+    "readback": 1200.0,
+    "after_test": 1200.0,
+    "was_reset": false,
+    "user_confirmed_effect": false,
+    "result": "no_effect"
+  }
+]

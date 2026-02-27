@@ -1,0 +1,189 @@
+{
+  "timestamp": "2026-02-27 11:21:43",
+  "phase": "2B",
+  "discovery": {
+    "pid": 30844,
+    "regions": 4760,
+    "total_mb": 1764.1,
+    "candidate_count": 4,
+    "candidates": [
+      {
+        "rank": 1,
+        "base_address": "0x4C903410",
+        "base_address_int": 1284518928,
+        "span": 8,
+        "match_count": 2,
+        "score": 19.92,
+        "matches": [
+          {
+            "addr": "0x4C903410",
+            "addr_int": 1284518928,
+            "value": 850.0
+          },
+          {
+            "addr": "0x4C903418",
+            "addr_int": 1284518936,
+            "value": 1000.0
+          }
+        ]
+      },
+      {
+        "rank": 2,
+        "base_address": "0x4927A7D0",
+        "base_address_int": 1227335632,
+        "span": 40,
+        "match_count": 2,
+        "score": 19.6,
+        "matches": [
+          {
+            "addr": "0x4927A7D0",
+            "addr_int": 1227335632,
+            "value": 850.0
+          },
+          {
+            "addr": "0x4927A7F8",
+            "addr_int": 1227335672,
+            "value": 1000.0
+          }
+        ]
+      },
+      {
+        "rank": 3,
+        "base_address": "0x4C8BEDB0",
+        "base_address_int": 1284238768,
+        "span": 80,
+        "match_count": 2,
+        "score": 19.2,
+        "matches": [
+          {
+            "addr": "0x4C8BEDB0",
+            "addr_int": 1284238768,
+            "value": 850.0
+          },
+          {
+            "addr": "0x4C8BEE00",
+            "addr_int": 1284238848,
+            "value": 1000.0
+          }
+        ]
+      },
+      {
+        "rank": 4,
+        "base_address": "0x45196E88",
+        "base_address_int": 1159294600,
+        "span": 112,
+        "match_count": 2,
+        "score": 18.88,
+        "matches": [
+          {
+            "addr": "0x45196E88",
+            "addr_int": 1159294600,
+            "value": 850.0
+          },
+          {
+            "addr": "0x45196EF8",
+            "addr_int": 1159294712,
+            "value": 1000.0
+          }
+        ]
+      }
+    ]
+  },
+  "verification": [
+    {
+      "group_rank": 1,
+      "base_address": "0x4C903410",
+      "verifications": [
+        {
+          "address": "0x4C903410",
+          "address_int": 1284518928,
+          "original_value": 850.0,
+          "test_value": 1275.0,
+          "write_ok": true,
+          "read_back": 1275.0,
+          "persisted": true,
+          "restored": true
+        },
+        {
+          "address": "0x4C903418",
+          "address_int": 1284518936,
+          "original_value": 1000.0,
+          "test_value": 1500.0,
+          "write_ok": true,
+          "read_back": 1500.0,
+          "persisted": true,
+          "restored": true
+        }
+      ]
+    },
+    {
+      "group_rank": 2,
+      "base_address": "0x4927A7D0",
+      "verifications": [
+        {
+          "address": "0x4927A7D0",
+          "address_int": 1227335632,
+          "original_value": 850.0,
+          "test_value": 1275.0,
+          "write_ok": true,
+          "read_back": 1275.0,
+          "persisted": true,
+          "restored": true
+        },
+        {
+          "address": "0x4927A7F8",
+          "address_int": 1227335672,
+          "original_value": 1000.0,
+          "test_value": 1500.0,
+          "write_ok": true,
+          "read_back": 1500.0,
+          "persisted": true,
+          "restored": true
+        }
+      ]
+    },
+    {
+      "group_rank": 3,
+      "base_address": "0x4C8BEDB0",
+      "verifications": [
+        {
+          "address": "0x4C8BEDB0",
+          "address_int": 1284238768,
+          "original_value": 850.0,
+          "test_value": 1275.0,
+          "write_ok": true,
+          "read_back": 1275.0,
+          "persisted": true,
+          "restored": true
+        },
+        {
+          "address": "0x4C8BEE00",
+          "address_int": 1284238848,
+          "original_value": 1000.0,
+          "test_value": 1500.0,
+          "write_ok": true,
+          "read_back": 1500.0,
+          "persisted": true,
+          "restored": true
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "total_candidates": 4,
+    "groups_verified": 3,
+    "addresses_tested": 6,
+    "persisted_writes": 6,
+    "best_candidate": {
+      "address": "0x4C903410",
+      "address_int": 1284518928,
+      "original_value": 850.0,
+      "test_value": 1275.0,
+      "write_ok": true,
+      "read_back": 1275.0,
+      "persisted": true,
+      "restored": true
+    },
+    "outcome": "found_writable"
+  }
+}

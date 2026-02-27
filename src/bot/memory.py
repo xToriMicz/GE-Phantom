@@ -172,7 +172,7 @@ class GameProcess:
                     protect=mbi.Protect,
                 ))
 
-            address = mbi.BaseAddress + mbi.RegionSize
+            address = (mbi.BaseAddress or 0) + mbi.RegionSize
 
         self._regions = regions
         return regions

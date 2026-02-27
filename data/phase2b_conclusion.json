@@ -1,0 +1,45 @@
+{
+  "phase": "2B",
+  "date": "2026-02-27",
+  "conclusion": "attack_range is server-authoritative",
+  "evidence": {
+    "memory_write_test": {
+      "groups_found": 4,
+      "addresses_tested": 6,
+      "writes_persisted": true,
+      "in_game_effect": false,
+      "reason": "addresses are static data tables, not live gameplay values"
+    },
+    "diff_scan_1": {
+      "old_value": 850.0,
+      "new_value": 730.0,
+      "addresses_scanned": 81,
+      "tracked_change": 0,
+      "new_addresses_with_new_value": 288,
+      "conclusion": "value appears in new allocations, not updated in-place"
+    },
+    "diff_scan_2": {
+      "old_value": 720.0,
+      "new_value": 850.0,
+      "addresses_scanned": 610,
+      "tracked_change": 0,
+      "new_addresses_with_new_value": 76,
+      "conclusion": "same pattern — no persistent address tracks range"
+    },
+    "sniffer_observation": {
+      "ranges_seen": [730.0, 803.0, 850.0],
+      "server_sends_range_every_combat_update": true,
+      "zone_ids": "264624-264666"
+    }
+  },
+  "characters_observed": {
+    "names": ["KajaDesigner", "Karjalainen22", "Scoutz"],
+    "level": "GrandMaster lv.103",
+    "ranges": [850.0, 803.0, "720-850 depending on weapon"]
+  },
+  "pivot_options": [
+    "position_spoofing: modify C2S PLAYER_MOVE packets to appear closer to targets",
+    "packet_injection: send attack/move commands directly without going through client",
+    "bot_movement: accept server range, build auto-walk-to-target + auto-attack bot"
+  ]
+}
