@@ -121,6 +121,13 @@ static volatile BYTE *g_cmd = NULL;
 static fn_GetPropertyNumber g_fn_get_prop = NULL;
 static fn_SetPropertyNumber g_fn_set_prop = NULL;
 
+/* Flag: pending game-thread command (GET_PROP/SET_PROP must run on main thread) */
+static volatile BYTE g_mainthread_cmd = CMD_NOP;
+
+/* Forward declarations for game-thread property calls */
+static double call_get_property(int idSpace, const char *objName, const char *propName);
+static BOOL call_set_property(int idSpace, const char *objName, const char *propName, double value);
+
 /* ─── Pipe Communication ──────────────────────────────────────── */
 
 /**
@@ -289,11 +296,85 @@ static void shmem_init(void)
     }
 }
 
+/* ─── Main-Thread Command Execution ──────────────────────────── */
+
+/**
+ * Execute property get/set commands on the main game thread.
+ * Called from hooked_send/hooked_recv which run on the game's main thread.
+ * The cmd_poll_thread sets g_mainthread_cmd; this function executes it.
+ */
+static void try_execute_mainthread_cmd(void)
+{
+    BYTE cmd;
+    volatile BYTE *mem = g_cmd;
+
+    if (!mem) return;
+
+    cmd = g_mainthread_cmd;
+    if (cmd == CMD_NOP) return;
+
+    switch (cmd) {
+    case CMD_GET_PROP:
+    {
+        int idSpace = *(volatile int *)(mem + CMD_OFF_PARAM1);
+        char propName[64];
+        char objName[64];
+        double val;
+
+        memcpy(propName, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
+        propName[63] = '\0';
+        memcpy(objName, (const void *)(mem + CMD_OFF_STR_PARAM2), 64);
+        objName[63] = '\0';
+
+        log_write("MAIN_THREAD CMD: GET_PROP idSpace=%d obj=\"%s\" prop=\"%s\"",
+            idSpace, objName, propName);
+
+        val = call_get_property(idSpace, objName[0] ? objName : NULL, propName);
+        *(volatile double *)(mem + CMD_OFF_RESULT_F64) = val;
+        *(volatile float *)(mem + CMD_OFF_RESULT_F32) = (float)val;
+        mem[CMD_OFF_STATUS] = (val == -9999.0) ? CMD_STATUS_ERROR : CMD_STATUS_DONE;
+        break;
+    }
+
+    case CMD_SET_PROP:
+    {
+        int idSpace = *(volatile int *)(mem + CMD_OFF_PARAM1);
+        char propName[64];
+        char objName[64];
+        double value;
+        BOOL ok;
+
+        memcpy(propName, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
+        propName[63] = '\0';
+        memcpy(objName, (const void *)(mem + CMD_OFF_STR_PARAM2), 64);
+        objName[63] = '\0';
+        value = *(volatile double *)(mem + CMD_OFF_RESULT_F64);
+
+        log_write("MAIN_THREAD CMD: SET_PROP idSpace=%d obj=\"%s\" prop=\"%s\" val=%f",
+            idSpace, objName, propName, value);
+
+        ok = call_set_property(idSpace, objName[0] ? objName : NULL, propName, value);
+        mem[CMD_OFF_STATUS] = ok ? CMD_STATUS_DONE : CMD_STATUS_ERROR;
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    /* Clear the main-thread command flag + shared mem command */
+    g_mainthread_cmd = CMD_NOP;
+    mem[CMD_OFF_COMMAND] = CMD_NOP;
+}
+
 /* ─── Hook Functions ──────────────────────────────────────────── */
 
 static int WSAAPI hooked_send(SOCKET s, const char *buf, int len, int flags)
 {
     LONG n = InterlockedIncrement(&g_send_count);
+
+    /* Execute pending game-thread commands (GET_PROP/SET_PROP) */
+    try_execute_mainthread_cmd();
 
     /* Log first few sends to debug file */
     if (n <= 5) {
@@ -313,6 +394,9 @@ static int WSAAPI hooked_send(SOCKET s, const char *buf, int len, int flags)
 static int WSAAPI hooked_recv(SOCKET s, char *buf, int len, int flags)
 {
     int result;
+
+    /* Execute pending game-thread commands (GET_PROP/SET_PROP) */
+    try_execute_mainthread_cmd();
 
     /* Call original first — we need the data */
     result = g_orig_recv(s, buf, len, flags);
@@ -854,6 +938,395 @@ static BOOL call_set_property(int idSpace, const char *objName, const char *prop
     }
 }
 
+/* ─── Phase 2: GetPropertyNumber Logging Hook ────────────────── */
+
+/**
+ * Inline hook on GetPropertyNumber (0x0089D5FC) to log ALL calls
+ * the game makes, capturing (objName, idSpace, propName) and the result.
+ *
+ * Uses the same 5-byte JMP detour + critical section approach as
+ * the send/recv detour hooks.
+ */
+
+static BYTE g_getprop_hook_bytes[5];
+static CRITICAL_SECTION g_getprop_lock;
+static volatile BOOL g_getprop_hooked = FALSE;
+static volatile LONG g_getprop_log_count = 0;
+
+static double __cdecl hooked_get_property_number(const char *objName, int idSpace, const char *propName)
+{
+    double result;
+    LONG n = InterlockedIncrement(&g_getprop_log_count);
+
+    /* Log the call */
+    log_write("HOOK_GET #%d: obj=\"%s\" idSpace=%d prop=\"%s\"",
+        n,
+        objName ? objName : "(null)",
+        idSpace,
+        propName ? propName : "(null)");
+
+    /* Call original: unhook -> call -> rehook (under lock) */
+    EnterCriticalSection(&g_getprop_lock);
+    inline_unhook((void *)GE_FUNC_GET_PROP_NUM, g_getprop_hook_bytes);
+    result = ((fn_GetPropertyNumber)GE_FUNC_GET_PROP_NUM)(objName, idSpace, propName);
+    inline_hook((void *)GE_FUNC_GET_PROP_NUM, hooked_get_property_number, g_getprop_hook_bytes);
+    LeaveCriticalSection(&g_getprop_lock);
+
+    /* Log result (only if non-zero or interesting) */
+    if (result != 0.0) {
+        log_write("HOOK_GET #%d: -> %f (obj=\"%s\" prop=\"%s\")", n, result, objName ? objName : "", propName ? propName : "");
+    }
+
+    return result;
+}
+
+static BOOL install_getprop_hook(void)
+{
+    if (g_getprop_hooked) {
+        log_write("getprop_hook: already installed");
+        return TRUE;
+    }
+
+    InitializeCriticalSection(&g_getprop_lock);
+
+    if (inline_hook((void *)GE_FUNC_GET_PROP_NUM, hooked_get_property_number, g_getprop_hook_bytes)) {
+        g_getprop_hooked = TRUE;
+        g_getprop_log_count = 0;
+        log_write("getprop_hook: INSTALLED at 0x%08X (orig bytes: %02X %02X %02X %02X %02X)",
+            GE_FUNC_GET_PROP_NUM,
+            g_getprop_hook_bytes[0], g_getprop_hook_bytes[1],
+            g_getprop_hook_bytes[2], g_getprop_hook_bytes[3],
+            g_getprop_hook_bytes[4]);
+        return TRUE;
+    }
+
+    log_write("getprop_hook: FAILED to install");
+    DeleteCriticalSection(&g_getprop_lock);
+    return FALSE;
+}
+
+static void remove_getprop_hook(void)
+{
+    if (!g_getprop_hooked)
+        return;
+
+    inline_unhook((void *)GE_FUNC_GET_PROP_NUM, g_getprop_hook_bytes);
+    g_getprop_hooked = FALSE;
+    DeleteCriticalSection(&g_getprop_lock);
+    log_write("getprop_hook: REMOVED (logged %d calls)", g_getprop_log_count);
+}
+
+/* ─── Phase 2: SetPropertyNumber Logging Hook ────────────────── */
+
+static BYTE g_setprop_hook_bytes[5];
+static CRITICAL_SECTION g_setprop_lock;
+static volatile BOOL g_setprop_hooked = FALSE;
+static volatile LONG g_setprop_log_count = 0;
+
+static void __cdecl hooked_set_property_number(const char *objName, int idSpace, const char *propName, double value)
+{
+    LONG n = InterlockedIncrement(&g_setprop_log_count);
+
+    log_write("HOOK_SET #%d: obj=\"%s\" idSpace=%d prop=\"%s\" value=%f",
+        n,
+        objName ? objName : "(null)",
+        idSpace,
+        propName ? propName : "(null)",
+        value);
+
+    /* Call original: unhook -> call -> rehook */
+    EnterCriticalSection(&g_setprop_lock);
+    inline_unhook((void *)GE_FUNC_SET_PROP_NUM, g_setprop_hook_bytes);
+    ((fn_SetPropertyNumber)GE_FUNC_SET_PROP_NUM)(objName, idSpace, propName, value);
+    inline_hook((void *)GE_FUNC_SET_PROP_NUM, hooked_set_property_number, g_setprop_hook_bytes);
+    LeaveCriticalSection(&g_setprop_lock);
+}
+
+static BOOL install_setprop_hook(void)
+{
+    if (g_setprop_hooked) {
+        log_write("setprop_hook: already installed");
+        return TRUE;
+    }
+
+    InitializeCriticalSection(&g_setprop_lock);
+
+    if (inline_hook((void *)GE_FUNC_SET_PROP_NUM, hooked_set_property_number, g_setprop_hook_bytes)) {
+        g_setprop_hooked = TRUE;
+        g_setprop_log_count = 0;
+        log_write("setprop_hook: INSTALLED at 0x%08X (orig bytes: %02X %02X %02X %02X %02X)",
+            GE_FUNC_SET_PROP_NUM,
+            g_setprop_hook_bytes[0], g_setprop_hook_bytes[1],
+            g_setprop_hook_bytes[2], g_setprop_hook_bytes[3],
+            g_setprop_hook_bytes[4]);
+        return TRUE;
+    }
+
+    log_write("setprop_hook: FAILED to install");
+    DeleteCriticalSection(&g_setprop_lock);
+    return FALSE;
+}
+
+static void remove_setprop_hook(void)
+{
+    if (!g_setprop_hooked)
+        return;
+
+    inline_unhook((void *)GE_FUNC_SET_PROP_NUM, g_setprop_hook_bytes);
+    g_setprop_hooked = FALSE;
+    DeleteCriticalSection(&g_setprop_lock);
+    log_write("setprop_hook: REMOVED (logged %d calls)", g_setprop_log_count);
+}
+
+/* ─── Phase 3: VTable Spy ────────────────────────────────────── */
+
+/**
+ * One-shot code cave at the KeepRange GET call site (0x004FEA4B).
+ * When the game reads KeepRange from a character object, we capture:
+ *   - ESI = character object pointer
+ *   - [ESI] = vtable address
+ *   - vtable[0x10] = getter function address
+ *   - vtable[0x28] = setter function address
+ *
+ * Hook replaces: push "KeepRange" (68 70 27 B8 00) with JMP to cave.
+ * Cave captures once, then passes through transparently.
+ */
+
+static volatile DWORD g_spy_obj_ptr = 0;
+static volatile DWORD g_spy_vtable = 0;
+static volatile DWORD g_spy_vtable_get = 0;
+static volatile DWORD g_spy_vtable_set = 0;
+static volatile BOOL  g_spy_armed = FALSE;
+static volatile BOOL  g_spy_done = FALSE;
+static volatile LONG  g_spy_trigger_count = 0;
+static BYTE g_spy_orig_bytes[5];
+static volatile BOOL g_spy_installed = FALSE;
+
+/* Logging helper callable from asm */
+static void __cdecl spy_log_capture(DWORD obj, DWORD vtable, DWORD get_fn, DWORD set_fn)
+{
+    log_write("VTABLE_SPY: obj=0x%08X vtable=0x%08X get_fn=0x%08X set_fn=0x%08X",
+        obj, vtable, get_fn, set_fn);
+}
+
+/**
+ * Naked code cave — entered via JMP from 0x004FEA4B.
+ * At entry: ESI = character object, stack has &[ebp-4] from previous push.
+ */
+__declspec(naked) static void __cdecl vtable_spy_cave(void)
+{
+    __asm {
+        /* Save all registers + flags */
+        pushad
+        pushfd
+
+        /* Always count triggers */
+        lock inc g_spy_trigger_count
+
+        /* Only capture when armed */
+        cmp g_spy_armed, 1
+        jne _spy_skip
+
+        /* Capture object pointer */
+        mov g_spy_obj_ptr, esi
+
+        /* Read vtable from [esi] */
+        mov eax, [esi]
+        mov g_spy_vtable, eax
+
+        /* Read vtable[0x10] = getter function */
+        mov ecx, [eax + 0x10]
+        mov g_spy_vtable_get, ecx
+
+        /* Read vtable[0x28] = setter function */
+        mov edx, [eax + 0x28]
+        mov g_spy_vtable_set, edx
+
+        /* Log the capture (safe to call from pushad block) */
+        push edx
+        push ecx
+        push eax
+        push esi
+        call spy_log_capture
+        add esp, 16
+
+        /* Signal done, disarm */
+        mov g_spy_armed, 0
+        mov g_spy_done, 1
+
+    _spy_skip:
+        /* Restore all registers + flags */
+        popfd
+        popad
+
+        /* Execute original instruction: push 0x00B82770 ("KeepRange") */
+        push 0x00B82770
+
+        /* Return to 0x004FEA50 (instruction after the replaced push) */
+        push 0x004FEA50
+        ret
+    }
+}
+
+static BOOL install_vtable_spy(void)
+{
+    if (g_spy_installed) {
+        log_write("vtable_spy: already installed, re-arming");
+        g_spy_done = FALSE;
+        g_spy_armed = TRUE;
+        return TRUE;
+    }
+
+    g_spy_done = FALSE;
+    g_spy_armed = TRUE;
+    g_spy_trigger_count = 0;
+
+    if (inline_hook((void *)GE_KEEPRANGE_SPY_SITE, vtable_spy_cave, g_spy_orig_bytes)) {
+        g_spy_installed = TRUE;
+        log_write("vtable_spy: INSTALLED at 0x%08X (orig: %02X %02X %02X %02X %02X)",
+            GE_KEEPRANGE_SPY_SITE,
+            g_spy_orig_bytes[0], g_spy_orig_bytes[1], g_spy_orig_bytes[2],
+            g_spy_orig_bytes[3], g_spy_orig_bytes[4]);
+        return TRUE;
+    }
+
+    log_write("vtable_spy: FAILED to install");
+    return FALSE;
+}
+
+static void remove_vtable_spy(void)
+{
+    if (!g_spy_installed)
+        return;
+
+    g_spy_armed = FALSE;
+    inline_unhook((void *)GE_KEEPRANGE_SPY_SITE, g_spy_orig_bytes);
+    g_spy_installed = FALSE;
+    log_write("vtable_spy: REMOVED (triggered %d times)", g_spy_trigger_count);
+}
+
+/* ─── Phase 3: VTable GET Hook ───────────────────────────────── */
+
+/**
+ * Persistent hook at the KeepRange vtable call site (0x004FEA58).
+ * Intercepts every KeepRange property read, logs the result,
+ * and optionally overrides the return value.
+ *
+ * Hook replaces: mov ecx,esi; call [edi+0x10] (8B CE FF 57 10)
+ * with JMP to cave.
+ *
+ * The cave executes the original two instructions, then captures
+ * the return value from FPU ST(0).
+ */
+
+static BYTE g_vtget_orig_bytes[5];
+static volatile BOOL  g_vtget_hooked = FALSE;
+static volatile LONG  g_vtget_count = 0;
+static volatile DWORD g_vtget_last_obj = 0;
+static volatile double g_vtget_last_value = 0.0;
+static volatile BOOL   g_vtget_override_active = FALSE;
+static volatile double g_vtget_override_value = 0.0;
+
+/* Helper: log a vtable get call (called from asm, cdecl) */
+static void __cdecl vtget_log_call(DWORD count, DWORD obj)
+{
+    /* Only log first 10 and then every 100th to avoid spam */
+    if (count <= 10 || (count % 100) == 0) {
+        log_write("VTGET #%u: obj=0x%08X value=%f%s",
+            count, obj, g_vtget_last_value,
+            g_vtget_override_active ? " [OVERRIDE]" : "");
+    }
+}
+
+/**
+ * Naked code cave for vtable GET hook.
+ * At entry: ESI = object, EDI = vtable ptr, stack has prop_id on top.
+ */
+__declspec(naked) static void __cdecl vtable_get_cave(void)
+{
+    __asm {
+        /* Execute original: mov ecx, esi (this = object) */
+        mov ecx, esi
+
+        /* Execute original: call [edi+0x10] (vtable GET) */
+        /* After call: result double in FPU ST(0), stack cleaned by callee */
+        call dword ptr [edi + 0x10]
+
+        /* Now: ST(0) = property value (double), prop_id cleaned from stack */
+
+        /* Save registers (FPU state NOT saved by pushad — that's what we want) */
+        pushad
+        pushfd
+
+        /* Increment counter */
+        lock inc g_vtget_count
+
+        /* Store object pointer */
+        mov g_vtget_last_obj, esi
+
+        /* Store FPU value to global (fst = store without popping) */
+        fst qword ptr [g_vtget_last_value]
+
+        /* Log the call */
+        push esi
+        push g_vtget_count
+        call vtget_log_call
+        add esp, 8
+
+        /* Check if override is active */
+        cmp g_vtget_override_active, 1
+        jne _vtget_no_override
+
+        /* Replace ST(0) with override value */
+        fstp st(0)
+        fld qword ptr [g_vtget_override_value]
+
+    _vtget_no_override:
+        popfd
+        popad
+
+        /* Jump back to 0x004FEA5D (mov eax, [ebp-4]) */
+        push 0x004FEA5D
+        ret
+    }
+}
+
+static BOOL install_vtable_get_hook(void)
+{
+    if (g_vtget_hooked) {
+        log_write("vtable_get_hook: already installed");
+        return TRUE;
+    }
+
+    g_vtget_count = 0;
+    g_vtget_last_obj = 0;
+    g_vtget_last_value = 0.0;
+
+    if (inline_hook((void *)GE_KEEPRANGE_GET_SITE, vtable_get_cave, g_vtget_orig_bytes)) {
+        g_vtget_hooked = TRUE;
+        log_write("vtable_get_hook: INSTALLED at 0x%08X (orig: %02X %02X %02X %02X %02X)",
+            GE_KEEPRANGE_GET_SITE,
+            g_vtget_orig_bytes[0], g_vtget_orig_bytes[1], g_vtget_orig_bytes[2],
+            g_vtget_orig_bytes[3], g_vtget_orig_bytes[4]);
+        return TRUE;
+    }
+
+    log_write("vtable_get_hook: FAILED to install");
+    return FALSE;
+}
+
+static void remove_vtable_get_hook(void)
+{
+    if (!g_vtget_hooked)
+        return;
+
+    g_vtget_override_active = FALSE;
+    inline_unhook((void *)GE_KEEPRANGE_GET_SITE, g_vtget_orig_bytes);
+    g_vtget_hooked = FALSE;
+    log_write("vtable_get_hook: REMOVED (intercepted %d calls, last_value=%f)",
+        g_vtget_count, g_vtget_last_value);
+}
+
 /* ─── Phase 2: Command Handler ───────────────────────────────── */
 
 /**
@@ -910,49 +1383,14 @@ static void process_command(void)
         break;
 
     case CMD_GET_PROP:
-    {
-        int idSpace = *(volatile int *)(mem + CMD_OFF_PARAM1);
-        char propName[64];
-        char objName[64];
-        double val;
-
-        /* Copy string params (volatile → local) */
-        memcpy(propName, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
-        propName[63] = '\0';
-        memcpy(objName, (const void *)(mem + CMD_OFF_STR_PARAM2), 64);
-        objName[63] = '\0';
-
-        log_write("CMD: GET_PROP idSpace=%d obj=\"%s\" prop=\"%s\"",
-            idSpace, objName, propName);
-
-        val = call_get_property(idSpace, objName[0] ? objName : NULL, propName);
-        *(volatile double *)(mem + CMD_OFF_RESULT_F64) = val;
-        *(volatile float *)(mem + CMD_OFF_RESULT_F32) = (float)val;
-        mem[CMD_OFF_STATUS] = (val == -9999.0) ? CMD_STATUS_ERROR : CMD_STATUS_DONE;
-        break;
-    }
-
     case CMD_SET_PROP:
-    {
-        int idSpace = *(volatile int *)(mem + CMD_OFF_PARAM1);
-        char propName[64];
-        char objName[64];
-        double value;
-        BOOL ok;
-
-        memcpy(propName, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
-        propName[63] = '\0';
-        memcpy(objName, (const void *)(mem + CMD_OFF_STR_PARAM2), 64);
-        objName[63] = '\0';
-        value = *(volatile double *)(mem + CMD_OFF_RESULT_F64);
-
-        log_write("CMD: SET_PROP idSpace=%d obj=\"%s\" prop=\"%s\" val=%f",
-            idSpace, objName, propName, value);
-
-        ok = call_set_property(idSpace, objName[0] ? objName : NULL, propName, value);
-        mem[CMD_OFF_STATUS] = ok ? CMD_STATUS_DONE : CMD_STATUS_ERROR;
-        break;
-    }
+        /* These must run on the main game thread (via hooked_send/recv).
+         * Signal the main thread and leave the command in shared memory. */
+        log_write("CMD: %s → deferred to main thread",
+            cmd == CMD_GET_PROP ? "GET_PROP" : "SET_PROP");
+        g_mainthread_cmd = cmd;
+        /* Don't clear CMD_OFF_COMMAND — main thread will handle it */
+        return;
 
     case CMD_READ_ADDR:
     {
@@ -1048,6 +1486,149 @@ static void process_command(void)
                 mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
             }
         }
+        break;
+    }
+
+    case CMD_HOOK_GETPROP:
+        log_write("CMD: HOOK_GETPROP");
+        if (install_getprop_hook()) {
+            *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = g_getprop_log_count;
+            mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        } else {
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+        }
+        break;
+
+    case CMD_UNHOOK_GETPROP:
+        log_write("CMD: UNHOOK_GETPROP");
+        remove_getprop_hook();
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = g_getprop_log_count;
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+
+    case CMD_HOOK_SETPROP:
+        log_write("CMD: HOOK_SETPROP");
+        if (install_setprop_hook()) {
+            *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = g_setprop_log_count;
+            mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        } else {
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+        }
+        break;
+
+    case CMD_UNHOOK_SETPROP:
+        log_write("CMD: UNHOOK_SETPROP");
+        remove_setprop_hook();
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = g_setprop_log_count;
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+
+    /* ── Phase 3: VTable Commands ─────────────────────────── */
+
+    case CMD_VTABLE_SPY:
+    {
+        int wait_ms;
+        log_write("CMD: VTABLE_SPY — installing one-shot spy at 0x%08X", GE_KEEPRANGE_SPY_SITE);
+
+        if (!install_vtable_spy()) {
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+            break;
+        }
+
+        /* Wait up to 30 seconds for the game to read KeepRange */
+        for (wait_ms = 0; wait_ms < 30000 && !g_spy_done; wait_ms += 100) {
+            Sleep(100);
+        }
+
+        if (g_spy_done) {
+            log_write("VTABLE_SPY: CAPTURED after %d ms (triggers=%d)", wait_ms, g_spy_trigger_count);
+            log_write("  obj_ptr    = 0x%08X", g_spy_obj_ptr);
+            log_write("  vtable     = 0x%08X", g_spy_vtable);
+            log_write("  vtable_get = 0x%08X (vtable[0x10])", g_spy_vtable_get);
+            log_write("  vtable_set = 0x%08X (vtable[0x28])", g_spy_vtable_set);
+
+            /* Write results to shared memory */
+            *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = g_spy_obj_ptr;
+            *(volatile DWORD *)(mem + CMD_OFF_PARAM1)     = g_spy_vtable_get;
+            *(volatile DWORD *)(mem + CMD_OFF_PARAM2)     = g_spy_vtable_set;
+            {
+                char result[96];
+                sprintf(result, "obj=0x%08X vt=0x%08X get=0x%08X set=0x%08X",
+                    g_spy_obj_ptr, g_spy_vtable, g_spy_vtable_get, g_spy_vtable_set);
+                memcpy((void *)(mem + CMD_OFF_STR_RESULT), result, strlen(result) + 1);
+            }
+            mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        } else {
+            log_write("VTABLE_SPY: TIMEOUT — game did not read KeepRange in 30s (triggers=%d)",
+                g_spy_trigger_count);
+            remove_vtable_spy();
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+        }
+        break;
+    }
+
+    case CMD_HOOK_VTABLE_GET:
+    {
+        log_write("CMD: HOOK_VTABLE_GET — hooking vtable call at 0x%08X", GE_KEEPRANGE_GET_SITE);
+
+        /* Remove spy if still installed (they're at adjacent sites) */
+        if (g_spy_installed) {
+            log_write("  removing spy first...");
+            remove_vtable_spy();
+        }
+
+        if (install_vtable_get_hook()) {
+            *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = 0;
+            mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        } else {
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+        }
+        break;
+    }
+
+    case CMD_UNHOOK_VTABLE_GET:
+        log_write("CMD: UNHOOK_VTABLE_GET");
+        remove_vtable_get_hook();
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = g_vtget_count;
+        *(volatile double *)(mem + CMD_OFF_RESULT_F64) = g_vtget_last_value;
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+
+    case CMD_SET_VTGET_OVERRIDE:
+    {
+        DWORD active = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
+        double val   = *(volatile double *)(mem + CMD_OFF_RESULT_F64);
+
+        if (active) {
+            g_vtget_override_value = val;
+            g_vtget_override_active = TRUE;
+            log_write("CMD: SET_VTGET_OVERRIDE ON value=%f", val);
+        } else {
+            g_vtget_override_active = FALSE;
+            log_write("CMD: SET_VTGET_OVERRIDE OFF");
+        }
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+    }
+
+    case CMD_VTGET_STATUS:
+    {
+        log_write("CMD: VTGET_STATUS count=%d last_obj=0x%08X last_val=%f override=%s",
+            g_vtget_count, g_vtget_last_obj, g_vtget_last_value,
+            g_vtget_override_active ? "ON" : "OFF");
+
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = g_vtget_count;
+        *(volatile double *)(mem + CMD_OFF_RESULT_F64) = g_vtget_last_value;
+        *(volatile DWORD *)(mem + CMD_OFF_PARAM1)      = g_vtget_last_obj;
+        *(volatile DWORD *)(mem + CMD_OFF_PARAM2)      = g_vtget_override_active ? 1 : 0;
+        {
+            char result[96];
+            sprintf(result, "count=%d obj=0x%08X val=%f ovr=%s",
+                g_vtget_count, g_vtget_last_obj, g_vtget_last_value,
+                g_vtget_override_active ? "ON" : "OFF");
+            memcpy((void *)(mem + CMD_OFF_STR_RESULT), result, strlen(result) + 1);
+        }
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
         break;
     }
 
@@ -1191,6 +1772,14 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
 
         /* Phase 2: Stop command thread */
         cmd_stop();
+
+        /* Phase 3: Remove vtable hooks if active */
+        remove_vtable_get_hook();
+        remove_vtable_spy();
+
+        /* Phase 2: Remove hooks if active */
+        remove_getprop_hook();
+        remove_setprop_hook();
 
         /* Clean up hooks */
         if (g_using_detour) {

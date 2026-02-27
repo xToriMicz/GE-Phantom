@@ -50,6 +50,15 @@ CMD_SET_PROP    = 0x03
 CMD_READ_ADDR       = 0x10
 CMD_SET_FUNC_ADDR   = 0x11
 CMD_FIND_STRING     = 0x12
+CMD_HOOK_GETPROP    = 0x20
+CMD_UNHOOK_GETPROP  = 0x21
+CMD_HOOK_SETPROP    = 0x22
+CMD_UNHOOK_SETPROP  = 0x23
+CMD_VTABLE_SPY          = 0x30
+CMD_HOOK_VTABLE_GET     = 0x31
+CMD_UNHOOK_VTABLE_GET   = 0x32
+CMD_SET_VTGET_OVERRIDE  = 0x33
+CMD_VTGET_STATUS        = 0x34
 CMD_PING            = 0xFE
 
 # Status
@@ -234,6 +243,30 @@ class PhantomCmd:
         status = self._send_cmd(CMD_SET_FUNC_ADDR)
         return status == STATUS_DONE
 
+    def hook_getprop(self) -> bool:
+        """Install logging hook on GetPropertyNumber. Logs all game calls to phantom_hook.log."""
+        status = self._send_cmd(CMD_HOOK_GETPROP)
+        return status == STATUS_DONE
+
+    def unhook_getprop(self) -> int:
+        """Remove logging hook. Returns total number of calls logged."""
+        status = self._send_cmd(CMD_UNHOOK_GETPROP)
+        if status == STATUS_DONE:
+            return self._read_u32(OFF_RESULT_I32)
+        return -1
+
+    def hook_setprop(self) -> bool:
+        """Install logging hook on SetPropertyNumber."""
+        status = self._send_cmd(CMD_HOOK_SETPROP)
+        return status == STATUS_DONE
+
+    def unhook_setprop(self) -> int:
+        """Remove SetPropertyNumber hook. Returns total calls logged."""
+        status = self._send_cmd(CMD_UNHOOK_SETPROP)
+        if status == STATUS_DONE:
+            return self._read_u32(OFF_RESULT_I32)
+        return -1
+
     def find_string(self, needle: str, start: int = 0, nth: int = 0) -> tuple[int, int]:
         """Find a string in ge.exe memory. Returns (address, total_matches) or (0, 0) on failure."""
         self._write_u32(OFF_PARAM1, start)
@@ -245,6 +278,53 @@ class PhantomCmd:
             count = self._read_u32(OFF_PARAM2)
             return addr, count
         return 0, 0
+
+    # ── Phase 3: VTable Spy & Hook ─────────────────────────────
+
+    def vtable_spy(self) -> dict | None:
+        """Install one-shot vtable spy. Waits up to 30s for game to read KeepRange.
+        Returns dict with obj_ptr, vtable_get, vtable_set, info string, or None on failure."""
+        status = self._send_cmd(CMD_VTABLE_SPY, timeout=35.0)
+        if status == STATUS_DONE:
+            return {
+                "obj_ptr": self._read_u32(OFF_RESULT_I32),
+                "vtable_get": self._read_u32(OFF_PARAM1),
+                "vtable_set": self._read_u32(OFF_PARAM2),
+                "info": self._read_str(OFF_STR_RESULT),
+            }
+        return None
+
+    def hook_vtable_get(self) -> bool:
+        """Install persistent hook on KeepRange vtable GET call site."""
+        status = self._send_cmd(CMD_HOOK_VTABLE_GET)
+        return status == STATUS_DONE
+
+    def unhook_vtable_get(self) -> int:
+        """Remove vtable GET hook. Returns total intercepted calls."""
+        status = self._send_cmd(CMD_UNHOOK_VTABLE_GET)
+        if status == STATUS_DONE:
+            return self._read_u32(OFF_RESULT_I32)
+        return -1
+
+    def set_vtget_override(self, active: bool, value: float = 0.0) -> bool:
+        """Set/clear override value for vtable GET hook."""
+        self._write_u32(OFF_PARAM1, 1 if active else 0)
+        self._write_f64(OFF_RESULT_F64, value)
+        status = self._send_cmd(CMD_SET_VTGET_OVERRIDE)
+        return status == STATUS_DONE
+
+    def vtget_status(self) -> dict | None:
+        """Read vtable GET hook stats."""
+        status = self._send_cmd(CMD_VTGET_STATUS)
+        if status == STATUS_DONE:
+            return {
+                "count": self._read_u32(OFF_RESULT_I32),
+                "last_value": self._read_f64(OFF_RESULT_F64),
+                "last_obj": self._read_u32(OFF_PARAM1),
+                "override_active": self._read_u32(OFF_PARAM2) != 0,
+                "info": self._read_str(OFF_STR_RESULT),
+            }
+        return None
 
 
 # ── CLI Commands ──────────────────────────────────────────────
@@ -377,6 +457,17 @@ def cmd_interactive(args):
     print("  setaddr set <hex>    — Set SetPropertyNumber address")
     print("  find <string> [start_hex] — Find string in memory")
     print("  probe [id] [obj]     — Probe all known range properties")
+    print("  hook                 — Hook GetPropertyNumber (log all game calls)")
+    print("  unhook               — Remove GetPropertyNumber hook")
+    print("  hookset              — Hook SetPropertyNumber (log all game calls)")
+    print("  unhookset            — Remove SetPropertyNumber hook")
+    print("  --- Phase 3: VTable ---")
+    print("  spy                  — One-shot vtable spy (wait for KeepRange read)")
+    print("  hookvt               — Hook vtable GET at KeepRange call site")
+    print("  unhookvt             — Remove vtable GET hook")
+    print("  override <value>     — Set override value for KeepRange GET")
+    print("  nooverride           — Clear KeepRange GET override")
+    print("  vtstatus             — Read vtable GET hook stats")
     print("  quit                 — Exit")
     print()
 
@@ -485,6 +576,33 @@ def cmd_interactive(args):
                 else:
                     print(f"  (error setting {name})")
 
+            elif verb == "hook":
+                if cmd.hook_getprop():
+                    print("[+] GetPropertyNumber hook INSTALLED — check phantom_hook.log")
+                    print("    Play the game normally, then 'unhook' to stop logging")
+                else:
+                    print("[!] Failed to install hook")
+
+            elif verb == "unhook":
+                count = cmd.unhook_getprop()
+                if count >= 0:
+                    print(f"[+] GetProp hook removed — logged {count} calls total")
+                else:
+                    print("[!] Failed to remove hook")
+
+            elif verb == "hookset":
+                if cmd.hook_setprop():
+                    print("[+] SetPropertyNumber hook INSTALLED — check phantom_hook.log")
+                else:
+                    print("[!] Failed to install SetProp hook")
+
+            elif verb == "unhookset":
+                count = cmd.unhook_setprop()
+                if count >= 0:
+                    print(f"[+] SetProp hook removed — logged {count} calls total")
+                else:
+                    print("[!] Failed to remove hook")
+
             elif verb == "probe":
                 id_s = int(parts[1]) if len(parts) > 1 else 0
                 obj = parts[2] if len(parts) > 2 else ""
@@ -495,6 +613,62 @@ def cmd_interactive(args):
                         print(f"    {prop:20s} = {val}")
                     else:
                         print(f"    {prop:20s} = (error)")
+
+            # ── Phase 3: VTable commands ──────────────────────
+
+            elif verb == "spy":
+                print("[*] Installing vtable spy... (waiting up to 30s for KeepRange read)")
+                print("    Play the game, move characters, or open skill info to trigger it.")
+                result = cmd.vtable_spy()
+                if result:
+                    print(f"[+] VTable spy captured!")
+                    print(f"    Object ptr:  0x{result['obj_ptr']:08X}")
+                    print(f"    VTable GET:  0x{result['vtable_get']:08X}")
+                    print(f"    VTable SET:  0x{result['vtable_set']:08X}")
+                    print(f"    Info: {result['info']}")
+                else:
+                    print("[!] Spy timed out — game didn't read KeepRange")
+
+            elif verb == "hookvt":
+                if cmd.hook_vtable_get():
+                    print("[+] VTable GET hook INSTALLED at KeepRange call site")
+                    print("    Every KeepRange read is now intercepted.")
+                    print("    Use 'vtstatus' to check, 'override <val>' to modify.")
+                else:
+                    print("[!] Failed to install vtable GET hook")
+
+            elif verb == "unhookvt":
+                count = cmd.unhook_vtable_get()
+                if count >= 0:
+                    print(f"[+] VTable GET hook removed — intercepted {count} calls")
+                else:
+                    print("[!] Failed to remove hook")
+
+            elif verb == "override":
+                if len(parts) < 2:
+                    print("Usage: override <value>  (e.g., override 50.0)")
+                    continue
+                val = float(parts[1])
+                if cmd.set_vtget_override(True, val):
+                    print(f"[+] Override ACTIVE — KeepRange will return {val}")
+                else:
+                    print("[!] Failed to set override")
+
+            elif verb == "nooverride":
+                if cmd.set_vtget_override(False):
+                    print("[+] Override CLEARED — KeepRange returns real value")
+                else:
+                    print("[!] Failed to clear override")
+
+            elif verb == "vtstatus":
+                result = cmd.vtget_status()
+                if result:
+                    print(f"  Calls intercepted: {result['count']}")
+                    print(f"  Last object:       0x{result['last_obj']:08X}")
+                    print(f"  Last value:        {result['last_value']}")
+                    print(f"  Override:          {'ON' if result['override_active'] else 'OFF'}")
+                else:
+                    print("[!] Failed to read status (hook not installed?)")
 
             else:
                 print(f"Unknown command: {verb}")

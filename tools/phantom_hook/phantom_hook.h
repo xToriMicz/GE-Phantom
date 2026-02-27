@@ -49,9 +49,10 @@
 #define GE_STR_SPL_RANGE        0x00B9BD64   /* "SplRange" */
 #define GE_STR_KEEP_RANGE       0x00B82770   /* "KeepRange" */
 
-/* Resolved function addresses (from tolua++ registration xrefs) */
-#define GE_FUNC_SET_PROP_NUM    0x006C6449   /* SetPropertyNumber C++ function */
-#define GE_FUNC_GET_PROP_NUM    0x008ABD73   /* GetPropertyNumber C++ function */
+/* Resolved function addresses (underlying C++ functions, NOT tolua wrappers) */
+/* tolua wrappers: Get=0x008ABD73, Set=0x006C6449 — these take lua_State*, don't call directly */
+#define GE_FUNC_GET_PROP_NUM    0x0089D5FC   /* GetPropertyNumber: double __cdecl (objName, idSpace, propName) */
+#define GE_FUNC_SET_PROP_NUM    0x005C62A2   /* SetPropertyNumber: void __cdecl (objName, idSpace, propName, value) */
 
 /* ─── Phase 2: Command Interface ─────────────────────────────── */
 
@@ -96,6 +97,15 @@
 #define CMD_READ_ADDR           0x10   /* Read 4 bytes from param1 address → result_i32 */
 #define CMD_SET_FUNC_ADDR       0x11   /* Set function addr: param1=addr, param2=0=get/1=set */
 #define CMD_FIND_STRING         0x12   /* Find string in .rdata: str_param=needle → result_i32=addr */
+#define CMD_HOOK_GETPROP        0x20   /* Install logging hook on GetPropertyNumber */
+#define CMD_UNHOOK_GETPROP      0x21   /* Remove logging hook */
+#define CMD_HOOK_SETPROP        0x22   /* Install logging hook on SetPropertyNumber */
+#define CMD_UNHOOK_SETPROP      0x23   /* Remove logging hook */
+#define CMD_VTABLE_SPY          0x30   /* One-shot vtable spy → captures obj, vtable, fn addrs */
+#define CMD_HOOK_VTABLE_GET     0x31   /* Persistent hook on vtable GET at KeepRange call site */
+#define CMD_UNHOOK_VTABLE_GET   0x32   /* Remove vtable GET hook */
+#define CMD_SET_VTGET_OVERRIDE  0x33   /* Set override value for vtable GET (f64), param1=0 off/1 on */
+#define CMD_VTGET_STATUS        0x34   /* Read hook stats → result_i32=count, f64=last_value, str=info */
 #define CMD_PING                0xFE   /* Ping → status=done, result_i32=0xDEADBEEF */
 
 /* Status codes (written by DLL to offset 0x01) */
@@ -137,6 +147,27 @@
  */
 typedef double (__cdecl *fn_GetPropertyNumber)(const char *objName, int idSpace, const char *propName);
 typedef void   (__cdecl *fn_SetPropertyNumber)(const char *objName, int idSpace, const char *propName, double value);
+
+/* ─── Phase 3: VTable Call Sites (from xref scan) ────────── */
+
+/*
+ * KeepRange GET call site at 0x004FEA4B (xref #1):
+ *
+ *   004FEA4A: 50              push eax              ; &[ebp-4]
+ *   004FEA4B: 68 70 27 B8 00  push "KeepRange"      ← SPY HOOK (5 bytes)
+ *   004FEA50: 8B 3E           mov edi, [esi]        ; vtable
+ *   004FEA52: E8 xx xx xx xx  call resolve_string
+ *   004FEA57: 50              push eax              ; prop_id
+ *   004FEA58: 8B CE           mov ecx, esi          ← GET HOOK (5 bytes)
+ *   004FEA5A: FF 57 10        call [edi+0x10]       ; vtable GET
+ *   004FEA5D: 8B 45 FC        mov eax, [ebp-4]      ; continue
+ *
+ * ESI = character object, EDI = vtable ptr (after 004FEA50)
+ */
+#define GE_KEEPRANGE_SPY_SITE    0x004FEA4B   /* push "KeepRange" — 5 bytes, spy target */
+#define GE_KEEPRANGE_SPY_RESUME  0x004FEA50   /* instruction after push */
+#define GE_KEEPRANGE_GET_SITE    0x004FEA58   /* mov ecx,esi; call [edi+0x10] — 5 bytes */
+#define GE_KEEPRANGE_GET_RESUME  0x004FEA5D   /* instruction after vtable call */
 
 /* Known property names to probe */
 #define PROP_SPL_RANGE      "SplRange"
