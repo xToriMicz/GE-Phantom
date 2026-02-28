@@ -946,6 +946,21 @@ static const char *format_timer(DWORD ms, char *buf, int buf_size)
 }
 
 /**
+ * Safe sysmsg wrapper — catches crashes when game UI isn't ready.
+ * Disables g_fn_sysmsg on first crash so subsequent calls are no-ops.
+ */
+static void safe_sysmsg(const char *text)
+{
+    if (!g_fn_sysmsg) return;
+    __try {
+        g_fn_sysmsg(text);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        log_write("safe_sysmsg: crashed (game not ready?) — disabling sysmsg");
+        g_fn_sysmsg = NULL;
+    }
+}
+
+/**
  * Handle bot hotkeys detected in WndProc.
  * Returns TRUE if the key was consumed (don't pass to game).
  *
@@ -968,7 +983,7 @@ static BOOL handle_bot_hotkey(BYTE vk, BOOL ctrl, BOOL shift, BOOL alt)
             g_bot.enabled = !g_bot.enabled;
             sprintf(msg, "[Bot] Master: %s", g_bot.enabled ? "ON" : "OFF");
             log_write("HOTKEY: %s", msg);
-            if (g_fn_sysmsg) g_fn_sysmsg(msg);
+            safe_sysmsg(msg);
             return TRUE;
         case '1':
             g_bot.auto_pick = !g_bot.auto_pick;
@@ -977,7 +992,7 @@ static BOOL handle_bot_hotkey(BYTE vk, BOOL ctrl, BOOL shift, BOOL alt)
             g_bot.pick_last_tick = GetTickCount();
             sprintf(msg, "[Bot] Auto Pick: %s (%ums)", g_bot.auto_pick ? "ON" : "OFF", g_bot.pick_interval_ms);
             log_write("HOTKEY: %s", msg);
-            if (g_fn_sysmsg) g_fn_sysmsg(msg);
+            safe_sysmsg(msg);
             return TRUE;
         case '2':
             g_bot.auto_attack = !g_bot.auto_attack;
@@ -986,7 +1001,7 @@ static BOOL handle_bot_hotkey(BYTE vk, BOOL ctrl, BOOL shift, BOOL alt)
             g_bot.attack_last_tick = GetTickCount();
             sprintf(msg, "[Bot] Auto Attack: %s (%ums)", g_bot.auto_attack ? "ON" : "OFF", g_bot.attack_interval_ms);
             log_write("HOTKEY: %s", msg);
-            if (g_fn_sysmsg) g_fn_sysmsg(msg);
+            safe_sysmsg(msg);
             return TRUE;
         }
     }
@@ -1004,7 +1019,7 @@ static BOOL handle_bot_hotkey(BYTE vk, BOOL ctrl, BOOL shift, BOOL alt)
                             c + 1, s + 1, g_skill_keys[c][s],
                             format_timer(new_ms, tbuf, sizeof(tbuf)));
                     log_write("HOTKEY: %s", msg);
-                    if (g_fn_sysmsg) g_fn_sysmsg(msg);
+                    safe_sysmsg(msg);
                     return TRUE;
                 }
             }
@@ -3255,9 +3270,9 @@ static void process_command(void)
         case 0: /* master */
             g_bot.enabled = (value == 0xFFFFFFFF) ? !g_bot.enabled : (BOOL)value;
             log_write("CMD: BOT_TOGGLE master=%d", g_bot.enabled);
-            if (g_fn_sysmsg) {
+            {
                 char m[32]; sprintf(m, "[Bot] Master: %s", g_bot.enabled ? "ON" : "OFF");
-                g_fn_sysmsg(m);
+                safe_sysmsg(m);
             }
             break;
         case 1: /* auto_pick */
