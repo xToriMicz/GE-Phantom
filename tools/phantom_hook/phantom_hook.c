@@ -2123,30 +2123,69 @@ static void process_command(void)
         log_write("CMD: SEND_KEY vk=0x%02X scan=0x%02X flags=%u hwnd=%p fg=%p (poll thread)",
                    vk, scan, flags, hwnd, prev_fg);
 
-        if (need_focus) {
-            SetForegroundWindow(hwnd);
-            Sleep(15);
-            log_write("  -> SetForegroundWindow to game (was %p)", prev_fg);
-        }
+        if (flags == 3) {
+            /* PostMessageW approach (AIgeHS pattern): no focus needed */
+            if (hwnd) {
+                PostMessageW(hwnd, WM_KEYDOWN, (WPARAM)vk, 0);
+                log_write("  -> PostMessageW WM_KEYDOWN vk=0x%02X lParam=0", vk);
+                Sleep(g_key_hold_ms);
+                PostMessageW(hwnd, WM_KEYUP, (WPARAM)vk, 0);
+                log_write("  -> PostMessageW WM_KEYUP vk=0x%02X lParam=0", vk);
+            } else {
+                log_write("  -> PostMessageW FAILED: no game window");
+                mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+                break;
+            }
+        } else if (flags == 4) {
+            /* PostMessageW KEYDOWN only (exact AIgeHS pattern) */
+            if (hwnd) {
+                PostMessageW(hwnd, WM_KEYDOWN, (WPARAM)vk, 0);
+                log_write("  -> PostMessageW WM_KEYDOWN-only vk=0x%02X lParam=0", vk);
+            } else {
+                log_write("  -> PostMessageW FAILED: no game window");
+                mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+                break;
+            }
+        } else if (flags == 5) {
+            /* SendMessageW approach (sync, no focus needed) */
+            if (hwnd) {
+                SendMessageW(hwnd, WM_KEYDOWN, (WPARAM)vk, 0);
+                log_write("  -> SendMessageW WM_KEYDOWN vk=0x%02X lParam=0", vk);
+                Sleep(g_key_hold_ms);
+                SendMessageW(hwnd, WM_KEYUP, (WPARAM)vk, 0);
+                log_write("  -> SendMessageW WM_KEYUP vk=0x%02X lParam=0", vk);
+            } else {
+                log_write("  -> SendMessageW FAILED: no game window");
+                mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+                break;
+            }
+        } else {
+            /* flags 0/1/2: original keybd_event approach (needs focus) */
+            if (need_focus) {
+                SetForegroundWindow(hwnd);
+                Sleep(15);
+                log_write("  -> SetForegroundWindow to game (was %p)", prev_fg);
+            }
 
-        if (flags == 0 || flags == 1) {
-            keybd_event((BYTE)vk, scan, 0, 0);
-            log_write("  -> keybd_event DOWN");
-        }
-        if (flags == 0) {
-            Sleep(g_key_hold_ms);
-            keybd_event((BYTE)vk, scan, KEYEVENTF_KEYUP, 0);
-            log_write("  -> keybd_event UP");
-        }
-        if (flags == 2) {
-            keybd_event((BYTE)vk, scan, KEYEVENTF_KEYUP, 0);
-            log_write("  -> keybd_event UP");
-        }
+            if (flags == 0 || flags == 1) {
+                keybd_event((BYTE)vk, scan, 0, 0);
+                log_write("  -> keybd_event DOWN");
+            }
+            if (flags == 0) {
+                Sleep(g_key_hold_ms);
+                keybd_event((BYTE)vk, scan, KEYEVENTF_KEYUP, 0);
+                log_write("  -> keybd_event UP");
+            }
+            if (flags == 2) {
+                keybd_event((BYTE)vk, scan, KEYEVENTF_KEYUP, 0);
+                log_write("  -> keybd_event UP");
+            }
 
-        if (need_focus && prev_fg) {
-            Sleep(10);
-            SetForegroundWindow(prev_fg);
-            log_write("  -> restored foreground to %p", prev_fg);
+            if (need_focus && prev_fg) {
+                Sleep(10);
+                SetForegroundWindow(prev_fg);
+                log_write("  -> restored foreground to %p", prev_fg);
+            }
         }
 
         mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
