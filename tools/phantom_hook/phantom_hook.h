@@ -65,7 +65,8 @@
  * ------  ----  -----
  * 0x00    1     command    (Python writes, DLL reads & clears)
  * 0x01    1     status     (DLL writes: 0=idle, 1=busy, 2=done, 0xFF=error)
- * 0x02    2     reserved
+ * 0x02    1     cmd_seq    (Python increments per command — sequence handshake)
+ * 0x03    1     ack_seq    (DLL echoes cmd_seq — proves THIS DLL handled it)
  * 0x04    4     param1     (command-specific parameter)
  * 0x08    4     param2     (command-specific parameter)
  * 0x0C    4     result_i32 (integer result from DLL)
@@ -82,6 +83,8 @@
 /* Offsets into shared memory */
 #define CMD_OFF_COMMAND         0x00
 #define CMD_OFF_STATUS          0x01
+#define CMD_OFF_CMD_SEQ         0x02   /* Sequence counter: Python increments per command */
+#define CMD_OFF_ACK_SEQ         0x03   /* Sequence ack: DLL echoes cmd_seq when processing */
 #define CMD_OFF_PARAM1          0x04
 #define CMD_OFF_PARAM2          0x08
 #define CMD_OFF_RESULT_I32      0x0C

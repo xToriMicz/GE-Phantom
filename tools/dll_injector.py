@@ -959,6 +959,59 @@ def cmd_list(args):
     return 0
 
 
+def cmd_clean(args):
+    """Eject ALL phantom_hook DLLs from ge.exe.
+
+    Finds all modules matching phantom_hook*.dll and ejects them.
+    Use this to clear stale DLLs that cause command conflicts.
+    After cleaning, re-inject the desired version.
+    """
+    pids = find_ge_pids()
+    if not pids:
+        print("[!] ge.exe not found")
+        return 1
+
+    pid = pids[0][0]
+    print(f"[*] Scanning ge.exe (PID {pid}) for phantom_hook DLLs...")
+
+    try:
+        modules = list_modules(pid)
+    except OSError as e:
+        print(f"[!] {e}")
+        return 1
+
+    # Find all phantom_hook DLLs
+    phantom_dlls = [
+        (name, base, size) for name, base, size in modules
+        if "phantom_hook" in name.lower()
+    ]
+
+    if not phantom_dlls:
+        print("[*] No phantom_hook DLLs found — already clean")
+        return 0
+
+    print(f"[*] Found {len(phantom_dlls)} phantom_hook DLL(s):")
+    for name, base, size in phantom_dlls:
+        print(f"    0x{base:08X}  {size:>10,}  {name}")
+
+    # Eject all of them
+    ejected = 0
+    failed = 0
+    for name, base, size in phantom_dlls:
+        print(f"\n[*] Ejecting {name}...")
+        if eject_dll(pid, name):
+            ejected += 1
+        else:
+            failed += 1
+            print(f"[!] Failed to eject {name} — may need a second pass")
+
+    print(f"\n[{'+'if failed == 0 else '!'}] Clean complete: {ejected} ejected, {failed} failed")
+    if ejected > 0:
+        print("[*] Shared memory will be released once all DLLs unload")
+        print("[*] Re-inject with: python tools/dll_injector.py inject --dll phantom_hook_v8.dll")
+    return 0 if failed == 0 else 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="GE_Phantom DLL Injector — inject hooks into ge.exe"
@@ -1000,6 +1053,10 @@ def main():
     # list
     p_list = sub.add_parser("list", help="List modules in ge.exe")
     p_list.set_defaults(func=cmd_list)
+
+    # clean
+    p_clean = sub.add_parser("clean", help="Eject ALL phantom_hook DLLs (fix stale DLL conflicts)")
+    p_clean.set_defaults(func=cmd_clean)
 
     args = parser.parse_args()
 

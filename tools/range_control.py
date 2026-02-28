@@ -38,6 +38,8 @@ OFF_PARAM2      = 0x08
 OFF_RESULT_I32  = 0x0C
 OFF_RESULT_F32  = 0x10
 OFF_RESULT_F64  = 0x14
+OFF_CMD_SEQ     = 0x02
+OFF_ACK_SEQ     = 0x03
 OFF_STR_PARAM   = 0x20
 OFF_STR_PARAM2  = 0x60
 OFF_STR_RESULT  = 0xA0
@@ -132,6 +134,7 @@ class PhantomCmd:
                 f"  Shared memory name: {SHMEM_NAME}"
             )
         self._handle, self._ptr, self._buf = result
+        self._seq = 0  # Command sequence counter (0-255, wrapping)
 
     def close(self):
         if self._ptr:
@@ -183,10 +186,28 @@ class PhantomCmd:
         return raw.decode("ascii", errors="replace")
 
     def _send_cmd(self, cmd: int, timeout: float = 5.0) -> int:
-        """Send a command and wait for completion. Returns status code."""
-        # Clear status
+        """Send a command and wait for completion. Returns status code.
+
+        Uses a sequence counter handshake: Python writes cmd_seq, DLL echoes
+        it to ack_seq. This detects stale DLLs that process the command but
+        don't know the current protocol (they won't echo the seq).
+        """
+        # Wait for any previous command to finish (avoid stale status reads)
+        for _ in range(20):
+            prev_cmd = self._read_byte(OFF_COMMAND)
+            if prev_cmd == CMD_NOP:
+                break
+            time.sleep(0.05)
+
+        # Increment sequence counter (wraps at 255)
+        self._seq = (self._seq + 1) & 0xFF
+        if self._seq == 0:
+            self._seq = 1  # avoid 0 — indistinguishable from uninitialized
+        self._write_byte(OFF_CMD_SEQ, self._seq)
+
+        # Clear ack and status, then write command
+        self._write_byte(OFF_ACK_SEQ, 0)
         self._write_byte(OFF_STATUS, STATUS_IDLE)
-        # Write command
         self._write_byte(OFF_COMMAND, cmd)
 
         # Poll for completion
@@ -194,7 +215,19 @@ class PhantomCmd:
         while True:
             status = self._read_byte(OFF_STATUS)
             if status == STATUS_DONE or status == STATUS_ERROR:
-                return status
+                # Verify this response is from OUR DLL (seq handshake)
+                ack = self._read_byte(OFF_ACK_SEQ)
+                if ack == self._seq:
+                    return status
+                # Wrong ack — a stale DLL handled it, not ours.
+                # If status is ERROR with wrong ack, it's likely a stale
+                # DLL that doesn't know this command. Keep waiting in case
+                # our DLL hasn't polled yet, but the command byte may
+                # already be cleared by the stale DLL.
+                cmd_now = self._read_byte(OFF_COMMAND)
+                if cmd_now == CMD_NOP and status == STATUS_ERROR:
+                    # Stale DLL ate our command. Return a distinct code.
+                    return -2  # stale DLL conflict
             if time.monotonic() - start > timeout:
                 return -1  # timeout
             time.sleep(0.05)
@@ -202,10 +235,19 @@ class PhantomCmd:
     def ping(self) -> bool:
         """Ping the DLL. Returns True if it responds."""
         status = self._send_cmd(CMD_PING)
+        if status == -2:
+            return False  # stale DLL conflict
         if status == STATUS_DONE:
             val = self._read_u32(OFF_RESULT_I32)
             return val == 0xDEADBEEF
         return False
+
+    @property
+    def last_status_was_stale(self) -> bool:
+        """Check if the last _send_cmd returned -2 (stale DLL conflict)."""
+        # Caller can check ack mismatch after any command
+        ack = self._read_byte(OFF_ACK_SEQ)
+        return ack != self._seq
 
     def scan(self) -> bool:
         """Trigger xref scan. Results are written to phantom_hook.log."""
@@ -595,6 +637,8 @@ def cmd_interactive(args):
     print("  override <value>     — Set override value for KeepRange GET")
     print("  nooverride           — Clear KeepRange GET override")
     print("  vtstatus             — Read vtable GET hook stats")
+    print("  --- Maintenance ---")
+    print("  clean                — Eject ALL phantom_hook DLLs (run as admin)")
     print("  quit                 — Exit")
     print()
 
@@ -854,6 +898,9 @@ def cmd_interactive(args):
                     key_arg = key_str
                 if cmd.send_key(key_arg):
                     print(f"  [+] key '{key_str}' tapped")
+                elif cmd.last_status_was_stale:
+                    print(f"  [!] STALE DLL CONFLICT — another phantom_hook DLL ate the command")
+                    print(f"      Run 'clean' to eject all, then re-inject v8 only")
                 else:
                     print(f"  [!] failed (unknown key or window not found)")
 
@@ -970,6 +1017,24 @@ def cmd_interactive(args):
                     print(f"  Override:          {'ON' if result['override_active'] else 'OFF'}")
                 else:
                     print("[!] Failed to read status (hook not installed?)")
+
+            # ── Maintenance commands ─────────────────────────
+
+            elif verb == "clean":
+                print("[*] Ejecting ALL phantom_hook DLLs from ge.exe...")
+                print("    (requires admin — run dll_injector.py clean if this fails)")
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        [sys.executable, "tools/dll_injector.py", "clean"],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    print(result.stdout)
+                    if result.stderr:
+                        print(result.stderr)
+                except Exception as e:
+                    print(f"[!] {e}")
+                    print("    Run manually: python tools/dll_injector.py clean")
 
             else:
                 print(f"Unknown command: {verb}")
