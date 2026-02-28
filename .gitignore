@@ -16,3 +16,26 @@ archive/
 # Generated analysis artifacts
 _matches.pkl
 *.pkl
+
+# Build artifacts
+*.obj
+*.exp
+*.lib
+
+# Logs
+*.log
+
+# Versioned/old DLLs (snapshots, not needed in repo)
+tools/phantom_hook/phantom_hook_v*.dll
+tools/phantom_hook/phantom_hook_old.dll
+
+# Old versioned build scripts
+tools/phantom_hook/build_v*.bat
+tools/phantom_hook/rebuild*.bat
+
+# Binary data dumps
+*.bin
+
+# Third-party tools
+AIgeHS Zip/
+tools/aigehs_unpacked.exe

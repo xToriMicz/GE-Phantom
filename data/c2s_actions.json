@@ -1,0 +1,1466 @@
+{
+  "packet_count": 97,
+  "opcode_summary": {
+    "KEEPALIVE": 78,
+    "PLAYER_ACTION": 18,
+    "0x2000": 1
+  },
+  "packets": [
+    {
+      "time": 1772180489.3697155,
+      "time_str": "15:21:29",
+      "payload_size": 18,
+      "raw_hex": "1000bd3ce3cc90fa737813d8058950599ce2",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000bd3ce3cc90fa737813d8058950599ce2"
+        }
+      ]
+    },
+    {
+      "time": 1772180490.3805568,
+      "time_str": "15:21:30",
+      "payload_size": 18,
+      "raw_hex": "1000637fc591c6025ea824abaed123c79369",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000637fc591c6025ea824abaed123c79369"
+        }
+      ]
+    },
+    {
+      "time": 1772180491.3923247,
+      "time_str": "15:21:31",
+      "payload_size": 18,
+      "raw_hex": "10001ee987f9473fcd2b9a79af5a25388c30",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10001ee987f9473fcd2b9a79af5a25388c30"
+        }
+      ]
+    },
+    {
+      "time": 1772180492.4011893,
+      "time_str": "15:21:32",
+      "payload_size": 18,
+      "raw_hex": "1000811004df1e1d6a8edb88955082347543",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000811004df1e1d6a8edb88955082347543"
+        }
+      ]
+    },
+    {
+      "time": 1772180493.4116347,
+      "time_str": "15:21:33",
+      "payload_size": 18,
+      "raw_hex": "10009991a604e48f266e8650f465e25f4d09",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10009991a604e48f266e8650f465e25f4d09"
+        }
+      ]
+    },
+    {
+      "time": 1772180494.4128852,
+      "time_str": "15:21:34",
+      "payload_size": 18,
+      "raw_hex": "1000a32f2a365206d7043e45b0f867716ff0",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000a32f2a365206d7043e45b0f867716ff0"
+        }
+      ]
+    },
+    {
+      "time": 1772180495.4194298,
+      "time_str": "15:21:35",
+      "payload_size": 18,
+      "raw_hex": "1000cdd571a64c8a8513fbcd1760c0d92128",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000cdd571a64c8a8513fbcd1760c0d92128"
+        }
+      ]
+    },
+    {
+      "time": 1772180496.4196224,
+      "time_str": "15:21:36",
+      "payload_size": 18,
+      "raw_hex": "100098506fea5ed6c42ab3f9b4e582d1012e",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100098506fea5ed6c42ab3f9b4e582d1012e"
+        }
+      ]
+    },
+    {
+      "time": 1772180497.4241846,
+      "time_str": "15:21:37",
+      "payload_size": 18,
+      "raw_hex": "10007bbe8c1242be127283b32e7962fc2aab",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10007bbe8c1242be127283b32e7962fc2aab"
+        }
+      ]
+    },
+    {
+      "time": 1772180498.4327612,
+      "time_str": "15:21:38",
+      "payload_size": 18,
+      "raw_hex": "1000bd1b3e650d03ecd7b3331b9d5fc34de9",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000bd1b3e650d03ecd7b3331b9d5fc34de9"
+        }
+      ]
+    },
+    {
+      "time": 1772180499.4339387,
+      "time_str": "15:21:39",
+      "payload_size": 18,
+      "raw_hex": "10000f9c9f0c9d44d01391e92c95578883f4",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10000f9c9f0c9d44d01391e92c95578883f4"
+        }
+      ]
+    },
+    {
+      "time": 1772180500.4406972,
+      "time_str": "15:21:40",
+      "payload_size": 18,
+      "raw_hex": "1000edb32fdbbdc222d108879cc752ff040a",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000edb32fdbbdc222d108879cc752ff040a"
+        }
+      ]
+    },
+    {
+      "time": 1772180501.4476418,
+      "time_str": "15:21:41",
+      "payload_size": 18,
+      "raw_hex": "1000ba9a01fbc2b76ba480c7b685594dca01",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000ba9a01fbc2b76ba480c7b685594dca01"
+        }
+      ]
+    },
+    {
+      "time": 1772180502.4542608,
+      "time_str": "15:21:42",
+      "payload_size": 18,
+      "raw_hex": "1000de7ed0a0f1d8365a030cd5f4f40c6159",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000de7ed0a0f1d8365a030cd5f4f40c6159"
+        }
+      ]
+    },
+    {
+      "time": 1772180503.4540622,
+      "time_str": "15:21:43",
+      "payload_size": 18,
+      "raw_hex": "1000f007bc1ecb1d46d92b62de0030b22f7c",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000f007bc1ecb1d46d92b62de0030b22f7c"
+        }
+      ]
+    },
+    {
+      "time": 1772180504.454432,
+      "time_str": "15:21:44",
+      "payload_size": 18,
+      "raw_hex": "10003aac1633b1e95d5396805cde4a7e2a55",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10003aac1633b1e95d5396805cde4a7e2a55"
+        }
+      ]
+    },
+    {
+      "time": 1772180505.4544036,
+      "time_str": "15:21:45",
+      "payload_size": 18,
+      "raw_hex": "1000e5c155201cfb7ac02be798b70f1d3d26",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000e5c155201cfb7ac02be798b70f1d3d26"
+        }
+      ]
+    },
+    {
+      "time": 1772180506.454211,
+      "time_str": "15:21:46",
+      "payload_size": 18,
+      "raw_hex": "1000c6ad7a035372129ef5f3c76067128a34",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000c6ad7a035372129ef5f3c76067128a34"
+        }
+      ]
+    },
+    {
+      "time": 1772180507.4632773,
+      "time_str": "15:21:47",
+      "payload_size": 18,
+      "raw_hex": "1000c03921de4aa0b6b6cffb55125c2b5b93",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000c03921de4aa0b6b6cffb55125c2b5b93"
+        }
+      ]
+    },
+    {
+      "time": 1772180508.4638684,
+      "time_str": "15:21:48",
+      "payload_size": 18,
+      "raw_hex": "1000231d8bcad80f42bc955ae07d9725c10a",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000231d8bcad80f42bc955ae07d9725c10a"
+        }
+      ]
+    },
+    {
+      "time": 1772180509.4654548,
+      "time_str": "15:21:49",
+      "payload_size": 18,
+      "raw_hex": "100073dffa4a37cda17b11ce6efbf44d8d5b",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100073dffa4a37cda17b11ce6efbf44d8d5b"
+        }
+      ]
+    },
+    {
+      "time": 1772180510.4776175,
+      "time_str": "15:21:50",
+      "payload_size": 18,
+      "raw_hex": "1000b867a0da74efac7038503ea496063b55",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000b867a0da74efac7038503ea496063b55"
+        }
+      ]
+    },
+    {
+      "time": 1772180511.4897664,
+      "time_str": "15:21:51",
+      "payload_size": 18,
+      "raw_hex": "1000726e309bae0eb4785a316e32d4a41914",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000726e309bae0eb4785a316e32d4a41914"
+        }
+      ]
+    },
+    {
+      "time": 1772180512.4918077,
+      "time_str": "15:21:52",
+      "payload_size": 18,
+      "raw_hex": "1000d5c539ac92dd76bd21fc42fe6544ddd3",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000d5c539ac92dd76bd21fc42fe6544ddd3"
+        }
+      ]
+    },
+    {
+      "time": 1772180513.4997563,
+      "time_str": "15:21:53",
+      "payload_size": 18,
+      "raw_hex": "10007336e470e1c74a531a6e4c4bd4d7dae6",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10007336e470e1c74a531a6e4c4bd4d7dae6"
+        }
+      ]
+    },
+    {
+      "time": 1772180514.509543,
+      "time_str": "15:21:54",
+      "payload_size": 18,
+      "raw_hex": "10004aa89dc39f300a1d0ea067e98bc75224",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10004aa89dc39f300a1d0ea067e98bc75224"
+        }
+      ]
+    },
+    {
+      "time": 1772180515.5165615,
+      "time_str": "15:21:55",
+      "payload_size": 18,
+      "raw_hex": "1000cb7bb588e700bc488785944f16ca3ace",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000cb7bb588e700bc488785944f16ca3ace"
+        }
+      ]
+    },
+    {
+      "time": 1772180515.8995597,
+      "time_str": "15:21:55",
+      "payload_size": 26,
+      "raw_hex": "18004174cd77a4d7bc77b0592122c749497d2623585832b0e2a9",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "18004174cd77a4d7bc77b0592122c749497d2623585832b0e2a9"
+        }
+      ]
+    },
+    {
+      "time": 1772180516.51656,
+      "time_str": "15:21:56",
+      "payload_size": 18,
+      "raw_hex": "1000752b4918f58277d71250b99bdd180a45",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000752b4918f58277d71250b99bdd180a45"
+        }
+      ]
+    },
+    {
+      "time": 1772180517.5165603,
+      "time_str": "15:21:57",
+      "payload_size": 18,
+      "raw_hex": "10005fb544dad52f077aa1f7b13442ec8d85",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10005fb544dad52f077aa1f7b13442ec8d85"
+        }
+      ]
+    },
+    {
+      "time": 1772180518.5175467,
+      "time_str": "15:21:58",
+      "payload_size": 18,
+      "raw_hex": "1000e15485df684a97aee93e91537be5ef7f",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000e15485df684a97aee93e91537be5ef7f"
+        }
+      ]
+    },
+    {
+      "time": 1772180519.5245712,
+      "time_str": "15:21:59",
+      "payload_size": 18,
+      "raw_hex": "1000578780307ecc959d1641f1cced5a21ab",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000578780307ecc959d1641f1cced5a21ab"
+        }
+      ]
+    },
+    {
+      "time": 1772180520.5243216,
+      "time_str": "15:22:00",
+      "payload_size": 18,
+      "raw_hex": "1000a544b8923fb5b8d78fdf009760afc675",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000a544b8923fb5b8d78fdf009760afc675"
+        }
+      ]
+    },
+    {
+      "time": 1772180521.5246296,
+      "time_str": "15:22:01",
+      "payload_size": 18,
+      "raw_hex": "10004cf77c3f906ecbb2beeb0006e6efd6a1",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10004cf77c3f906ecbb2beeb0006e6efd6a1"
+        }
+      ]
+    },
+    {
+      "time": 1772180522.524482,
+      "time_str": "15:22:02",
+      "payload_size": 18,
+      "raw_hex": "1000acfa3305ad45dcc7289fcc8598d3fdc1",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000acfa3305ad45dcc7289fcc8598d3fdc1"
+        }
+      ]
+    },
+    {
+      "time": 1772180523.5242734,
+      "time_str": "15:22:03",
+      "payload_size": 18,
+      "raw_hex": "1000c3e7700e016ebe7a095cdeae0196fdc8",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000c3e7700e016ebe7a095cdeae0196fdc8"
+        }
+      ]
+    },
+    {
+      "time": 1772180523.5802739,
+      "time_str": "15:22:03",
+      "payload_size": 18,
+      "raw_hex": "10003ffc47ab657701bb0d590c4c8f728b79",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10003ffc47ab657701bb0d590c4c8f728b79"
+        }
+      ]
+    },
+    {
+      "time": 1772180524.1718369,
+      "time_str": "15:22:04",
+      "payload_size": 34,
+      "raw_hex": "200022621035f99b76a6b6bf6fa2f94b76047628b0a629ee80e519ba1ab4609e5c87",
+      "parsed": [
+        {
+          "opcode": "0x2000",
+          "name": "0x2000",
+          "offset": 0,
+          "size": 34,
+          "hex": "200022621035f99b76a6b6bf6fa2f94b76047628b0a629ee80e519ba1ab4609e5c87",
+          "note": "unknown_size"
+        }
+      ]
+    },
+    {
+      "time": 1772180524.5271704,
+      "time_str": "15:22:04",
+      "payload_size": 18,
+      "raw_hex": "100017205de6130cda010aa9d0ab3da72005",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100017205de6130cda010aa9d0ab3da72005"
+        }
+      ]
+    },
+    {
+      "time": 1772180525.5341048,
+      "time_str": "15:22:05",
+      "payload_size": 18,
+      "raw_hex": "10002bfdd7fafda9ab909b5d8724e5b905c7",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10002bfdd7fafda9ab909b5d8724e5b905c7"
+        }
+      ]
+    },
+    {
+      "time": 1772180526.5404239,
+      "time_str": "15:22:06",
+      "payload_size": 18,
+      "raw_hex": "100097aeb536a72226c10641d64f9b8e7595",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100097aeb536a72226c10641d64f9b8e7595"
+        }
+      ]
+    },
+    {
+      "time": 1772180526.7215524,
+      "time_str": "15:22:06",
+      "payload_size": 18,
+      "raw_hex": "10002a4c37768cd9ab3e4fc4c05de8cad57f",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10002a4c37768cd9ab3e4fc4c05de8cad57f"
+        }
+      ]
+    },
+    {
+      "time": 1772180527.5475984,
+      "time_str": "15:22:07",
+      "payload_size": 18,
+      "raw_hex": "100002f7beebfb8bfb12dd7060c9ae000c44",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100002f7beebfb8bfb12dd7060c9ae000c44"
+        }
+      ]
+    },
+    {
+      "time": 1772180527.6523876,
+      "time_str": "15:22:07",
+      "payload_size": 26,
+      "raw_hex": "1800ee7a7787ac3c45d8f384489c0bbc294c46a7f8cf47a82c21",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "1800ee7a7787ac3c45d8f384489c0bbc294c46a7f8cf47a82c21"
+        }
+      ]
+    },
+    {
+      "time": 1772180528.2060485,
+      "time_str": "15:22:08",
+      "payload_size": 18,
+      "raw_hex": "1000b545bcb1fff8395d279915012eb8734c",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000b545bcb1fff8395d279915012eb8734c"
+        }
+      ]
+    },
+    {
+      "time": 1772180528.547771,
+      "time_str": "15:22:08",
+      "payload_size": 18,
+      "raw_hex": "100006d9c8c9cbc73382bab407678be98444",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100006d9c8c9cbc73382bab407678be98444"
+        }
+      ]
+    },
+    {
+      "time": 1772180529.5475533,
+      "time_str": "15:22:09",
+      "payload_size": 18,
+      "raw_hex": "1000c254ffa9c24ab382abb365ec4b6832b3",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000c254ffa9c24ab382abb365ec4b6832b3"
+        }
+      ]
+    },
+    {
+      "time": 1772180530.5478063,
+      "time_str": "15:22:10",
+      "payload_size": 18,
+      "raw_hex": "1000dd01e0dc65f89af70faf950d725f0d1f",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000dd01e0dc65f89af70faf950d725f0d1f"
+        }
+      ]
+    },
+    {
+      "time": 1772180530.6657789,
+      "time_str": "15:22:10",
+      "payload_size": 26,
+      "raw_hex": "1800f58bbfb23e3a7e4442e3476a3f1784248a25e0a52f4fcfe9",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "1800f58bbfb23e3a7e4442e3476a3f1784248a25e0a52f4fcfe9"
+        }
+      ]
+    },
+    {
+      "time": 1772180530.8534017,
+      "time_str": "15:22:10",
+      "payload_size": 26,
+      "raw_hex": "1800cbb901b7c88cba0b3913e127325cb7fceb40d7715e46d85e",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "1800cbb901b7c88cba0b3913e127325cb7fceb40d7715e46d85e"
+        }
+      ]
+    },
+    {
+      "time": 1772180531.226577,
+      "time_str": "15:22:11",
+      "payload_size": 18,
+      "raw_hex": "1000d8b2983eb3fb8a70e93a2bcdb729a2a3",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000d8b2983eb3fb8a70e93a2bcdb729a2a3"
+        }
+      ]
+    },
+    {
+      "time": 1772180531.554455,
+      "time_str": "15:22:11",
+      "payload_size": 18,
+      "raw_hex": "1000bcbf86b8ab9cfcf9e2422973d32f7b1f",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000bcbf86b8ab9cfcf9e2422973d32f7b1f"
+        }
+      ]
+    },
+    {
+      "time": 1772180532.554044,
+      "time_str": "15:22:12",
+      "payload_size": 18,
+      "raw_hex": "1000c6c409da3adf402ad285c50167d275bb",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000c6c409da3adf402ad285c50167d275bb"
+        }
+      ]
+    },
+    {
+      "time": 1772180533.555056,
+      "time_str": "15:22:13",
+      "payload_size": 18,
+      "raw_hex": "10005f57bab11058222bb7fb264c66287a0f",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10005f57bab11058222bb7fb264c66287a0f"
+        }
+      ]
+    },
+    {
+      "time": 1772180534.5615716,
+      "time_str": "15:22:14",
+      "payload_size": 18,
+      "raw_hex": "1000110651669d2837169732a6e87933a9ab",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000110651669d2837169732a6e87933a9ab"
+        }
+      ]
+    },
+    {
+      "time": 1772180535.4016907,
+      "time_str": "15:22:15",
+      "payload_size": 26,
+      "raw_hex": "180018b3c972d55a00ce15fac6929fb4a80ffabb7c98b9bc598a",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "180018b3c972d55a00ce15fac6929fb4a80ffabb7c98b9bc598a"
+        }
+      ]
+    },
+    {
+      "time": 1772180535.560783,
+      "time_str": "15:22:15",
+      "payload_size": 18,
+      "raw_hex": "1000378ee8aead1c23b3592c90a5cc8cf4e5",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000378ee8aead1c23b3592c90a5cc8cf4e5"
+        }
+      ]
+    },
+    {
+      "time": 1772180536.2264605,
+      "time_str": "15:22:16",
+      "payload_size": 18,
+      "raw_hex": "1000512c26f6624b14ba17035251e7aa2984",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000512c26f6624b14ba17035251e7aa2984"
+        }
+      ]
+    },
+    {
+      "time": 1772180536.5608795,
+      "time_str": "15:22:16",
+      "payload_size": 18,
+      "raw_hex": "1000c73a2c7180fc157233e0f25bc01dc4be",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000c73a2c7180fc157233e0f25bc01dc4be"
+        }
+      ]
+    },
+    {
+      "time": 1772180537.3949814,
+      "time_str": "15:22:17",
+      "payload_size": 26,
+      "raw_hex": "18002344182fd39330c399d9ae8625a800fab79d3875745318bd",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "18002344182fd39330c399d9ae8625a800fab79d3875745318bd"
+        }
+      ]
+    },
+    {
+      "time": 1772180537.5608814,
+      "time_str": "15:22:17",
+      "payload_size": 18,
+      "raw_hex": "1000d7f64553d8498f99eb33b4aeb7d45530",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000d7f64553d8498f99eb33b4aeb7d45530"
+        }
+      ]
+    },
+    {
+      "time": 1772180537.6035194,
+      "time_str": "15:22:17",
+      "payload_size": 26,
+      "raw_hex": "1800df15197bd2dc78d04445cfe9e8a8f81ddac5fe2cb2868b8d",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "1800df15197bd2dc78d04445cfe9e8a8f81ddac5fe2cb2868b8d"
+        }
+      ]
+    },
+    {
+      "time": 1772180537.7973518,
+      "time_str": "15:22:17",
+      "payload_size": 26,
+      "raw_hex": "1800508ea960c1011f08f0f06ea714b1a9c0f3305b0c65cdc0b3",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "1800508ea960c1011f08f0f06ea714b1a9c0f3305b0c65cdc0b3"
+        }
+      ]
+    },
+    {
+      "time": 1772180538.413918,
+      "time_str": "15:22:18",
+      "payload_size": 18,
+      "raw_hex": "100060756b166f27b91bd23061dff9efe4d1",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100060756b166f27b91bd23061dff9efe4d1"
+        }
+      ]
+    },
+    {
+      "time": 1772180538.5610142,
+      "time_str": "15:22:18",
+      "payload_size": 18,
+      "raw_hex": "1000630153ddc4fc46b66570a0bd2deca56b",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000630153ddc4fc46b66570a0bd2deca56b"
+        }
+      ]
+    },
+    {
+      "time": 1772180539.5679176,
+      "time_str": "15:22:19",
+      "payload_size": 18,
+      "raw_hex": "10000c86489e612cffad8629f156a37871fe",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10000c86489e612cffad8629f156a37871fe"
+        }
+      ]
+    },
+    {
+      "time": 1772180540.2487404,
+      "time_str": "15:22:20",
+      "payload_size": 26,
+      "raw_hex": "18000fa29fddf8efd9c113fabc53e1f0aa75fb93a2c97e59e473",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "18000fa29fddf8efd9c113fabc53e1f0aa75fb93a2c97e59e473"
+        }
+      ]
+    },
+    {
+      "time": 1772180540.3317132,
+      "time_str": "15:22:20",
+      "payload_size": 18,
+      "raw_hex": "1000a040075d133f0960bc2523fe63084915",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000a040075d133f0960bc2523fe63084915"
+        }
+      ]
+    },
+    {
+      "time": 1772180540.4704845,
+      "time_str": "15:22:20",
+      "payload_size": 26,
+      "raw_hex": "18004eca4f541aa5b693ba7caac9fa40bd22571597af0743d9af",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "18004eca4f541aa5b693ba7caac9fa40bd22571597af0743d9af"
+        }
+      ]
+    },
+    {
+      "time": 1772180540.5749454,
+      "time_str": "15:22:20",
+      "payload_size": 18,
+      "raw_hex": "1000be1c4f2691560eff90cd854abd98df90",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000be1c4f2691560eff90cd854abd98df90"
+        }
+      ]
+    },
+    {
+      "time": 1772180540.8100693,
+      "time_str": "15:22:20",
+      "payload_size": 18,
+      "raw_hex": "10004c27044f7177af55a13ebb1fb7df2c01",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10004c27044f7177af55a13ebb1fb7df2c01"
+        }
+      ]
+    },
+    {
+      "time": 1772180541.5749815,
+      "time_str": "15:22:21",
+      "payload_size": 18,
+      "raw_hex": "10001080c164796e05dbc69ff8ea35dba415",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10001080c164796e05dbc69ff8ea35dba415"
+        }
+      ]
+    },
+    {
+      "time": 1772180541.8321881,
+      "time_str": "15:22:21",
+      "payload_size": 26,
+      "raw_hex": "18007e61cb2a91b1810334f2c801dfb0d720b3c588439592b76f",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "18007e61cb2a91b1810334f2c801dfb0d720b3c588439592b76f"
+        }
+      ]
+    },
+    {
+      "time": 1772180542.0402882,
+      "time_str": "15:22:22",
+      "payload_size": 26,
+      "raw_hex": "180050ea7cabe0f45bdcfc16d4cd221b38c4206c4b57bfc9fc2a",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "180050ea7cabe0f45bdcfc16d4cd221b38c4206c4b57bfc9fc2a"
+        }
+      ]
+    },
+    {
+      "time": 1772180542.5814462,
+      "time_str": "15:22:22",
+      "payload_size": 18,
+      "raw_hex": "100070492c0a32324f8cc6a999a5dcae5fab",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100070492c0a32324f8cc6a999a5dcae5fab"
+        }
+      ]
+    },
+    {
+      "time": 1772180542.6845036,
+      "time_str": "15:22:22",
+      "payload_size": 26,
+      "raw_hex": "18008820526702505e2bdb535ad0ec01a10441c7ae4664ede034",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "18008820526702505e2bdb535ad0ec01a10441c7ae4664ede034"
+        }
+      ]
+    },
+    {
+      "time": 1772180542.8853862,
+      "time_str": "15:22:22",
+      "payload_size": 26,
+      "raw_hex": "180062ad968c9a253d2fdb535ad0ec01a1040667dc16501b374b",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "180062ad968c9a253d2fdb535ad0ec01a1040667dc16501b374b"
+        }
+      ]
+    },
+    {
+      "time": 1772180543.581303,
+      "time_str": "15:22:23",
+      "payload_size": 18,
+      "raw_hex": "10005b4899ee66615e7f07b29fb5e87a2048",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10005b4899ee66615e7f07b29fb5e87a2048"
+        }
+      ]
+    },
+    {
+      "time": 1772180543.894335,
+      "time_str": "15:22:23",
+      "payload_size": 26,
+      "raw_hex": "1800f326b9b07d568b8510a91e9112d1535f6ee2ee68534f2d6c",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "1800f326b9b07d568b8510a91e9112d1535f6ee2ee68534f2d6c"
+        }
+      ]
+    },
+    {
+      "time": 1772180544.337338,
+      "time_str": "15:22:24",
+      "payload_size": 18,
+      "raw_hex": "10001081e46f20cde75d56b0685c55281de7",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10001081e46f20cde75d56b0685c55281de7"
+        }
+      ]
+    },
+    {
+      "time": 1772180544.5809798,
+      "time_str": "15:22:24",
+      "payload_size": 18,
+      "raw_hex": "1000c1e38bcd2ab821888f60a1c8347746a1",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000c1e38bcd2ab821888f60a1c8347746a1"
+        }
+      ]
+    },
+    {
+      "time": 1772180545.5818422,
+      "time_str": "15:22:25",
+      "payload_size": 18,
+      "raw_hex": "1000a5107d407c4ecc794528448bf0ba7255",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000a5107d407c4ecc794528448bf0ba7255"
+        }
+      ]
+    },
+    {
+      "time": 1772180545.8252022,
+      "time_str": "15:22:25",
+      "payload_size": 26,
+      "raw_hex": "18009429346fd09c7a5090536f30055eeb28bb460ad27514753a",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "18009429346fd09c7a5090536f30055eeb28bb460ad27514753a"
+        }
+      ]
+    },
+    {
+      "time": 1772180546.0192018,
+      "time_str": "15:22:26",
+      "payload_size": 26,
+      "raw_hex": "18006359af40cb34a69f950b5542e7c315d06833f4c0eb704d21",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "18006359af40cb34a69f950b5542e7c315d06833f4c0eb704d21"
+        }
+      ]
+    },
+    {
+      "time": 1772180546.5882025,
+      "time_str": "15:22:26",
+      "payload_size": 18,
+      "raw_hex": "10003b93cb259c2d14c533d912e1b6a4c756",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10003b93cb259c2d14c533d912e1b6a4c756"
+        }
+      ]
+    },
+    {
+      "time": 1772180547.2062008,
+      "time_str": "15:22:27",
+      "payload_size": 26,
+      "raw_hex": "1800da826498b1935def30248c32af8e0b84b1860d65fd607447",
+      "parsed": [
+        {
+          "opcode": "0x1800",
+          "name": "PLAYER_ACTION",
+          "offset": 0,
+          "size": 26,
+          "hex": "1800da826498b1935def30248c32af8e0b84b1860d65fd607447"
+        }
+      ]
+    },
+    {
+      "time": 1772180547.5952008,
+      "time_str": "15:22:27",
+      "payload_size": 18,
+      "raw_hex": "1000b3efe3ae6da8dc95b80aee808923bbd3",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000b3efe3ae6da8dc95b80aee808923bbd3"
+        }
+      ]
+    },
+    {
+      "time": 1772180548.399189,
+      "time_str": "15:22:28",
+      "payload_size": 18,
+      "raw_hex": "100038e193941ee57749c91edad46fb02c49",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100038e193941ee57749c91edad46fb02c49"
+        }
+      ]
+    },
+    {
+      "time": 1772180548.5951905,
+      "time_str": "15:22:28",
+      "payload_size": 18,
+      "raw_hex": "1000e00d2666a877c5ce786cc267e37950ca",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000e00d2666a877c5ce786cc267e37950ca"
+        }
+      ]
+    },
+    {
+      "time": 1772180549.59419,
+      "time_str": "15:22:29",
+      "payload_size": 18,
+      "raw_hex": "10008b6f9d0d12d4d1a1f370d27a7add3111",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10008b6f9d0d12d4d1a1f370d27a7add3111"
+        }
+      ]
+    },
+    {
+      "time": 1772180550.58719,
+      "time_str": "15:22:30",
+      "payload_size": 18,
+      "raw_hex": "100010268ea8009dba7150c348e7b58e1ac7",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100010268ea8009dba7150c348e7b58e1ac7"
+        }
+      ]
+    },
+    {
+      "time": 1772180550.6151907,
+      "time_str": "15:22:30",
+      "payload_size": 18,
+      "raw_hex": "1000419b115466c1a046a318802cb920d426",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000419b115466c1a046a318802cb920d426"
+        }
+      ]
+    },
+    {
+      "time": 1772180551.5947323,
+      "time_str": "15:22:31",
+      "payload_size": 18,
+      "raw_hex": "10001259f135840ca1f676eb2fb890b89260",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "10001259f135840ca1f676eb2fb890b89260"
+        }
+      ]
+    },
+    {
+      "time": 1772180552.5942888,
+      "time_str": "15:22:32",
+      "payload_size": 18,
+      "raw_hex": "100076b3d4c3ab02aca1eb106ecc890531f5",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100076b3d4c3ab02aca1eb106ecc890531f5"
+        }
+      ]
+    },
+    {
+      "time": 1772180553.5952942,
+      "time_str": "15:22:33",
+      "payload_size": 18,
+      "raw_hex": "100099a9210f8d43b967654762679f08eb0a",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100099a9210f8d43b967654762679f08eb0a"
+        }
+      ]
+    },
+    {
+      "time": 1772180554.600968,
+      "time_str": "15:22:34",
+      "payload_size": 18,
+      "raw_hex": "1000a2c922dee989d35793797bab5a06a85a",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "1000a2c922dee989d35793797bab5a06a85a"
+        }
+      ]
+    },
+    {
+      "time": 1772180555.6078258,
+      "time_str": "15:22:35",
+      "payload_size": 18,
+      "raw_hex": "100017499b511de8df6c43181d11208744f3",
+      "parsed": [
+        {
+          "opcode": "0x1000",
+          "name": "KEEPALIVE",
+          "offset": 0,
+          "size": 18,
+          "hex": "100017499b511de8df6c43181d11208744f3"
+        }
+      ]
+    }
+  ]
+}
