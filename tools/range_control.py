@@ -27,7 +27,8 @@ import time
 
 # ── Shared Memory Layout (must match phantom_hook.h) ──────────
 
-SHMEM_NAME = "Local\\ge_phantom_cmd"
+SHMEM_NAME_LEGACY = "Local\\ge_phantom_cmd"       # old (non-PID)
+SHMEM_NAME_FMT    = "Local\\ge_phantom_cmd_%u"    # new (per-PID)
 SHMEM_SIZE = 256
 
 # Offsets
@@ -66,8 +67,20 @@ CMD_SYSMSG          = 0x41
 CMD_UPDATE_ITEM_TABLE = 0x42
 CMD_SEND_KEY        = 0x43
 CMD_SEND_KEYS       = 0x44
+CMD_KEY_COMBO       = 0x45   # KeyCombo: param1=VK, param2=modifier bitmask
 CMD_DUMP_MEM        = 0x50
 CMD_SCAN_XREF_STR   = 0x51
+CMD_HOOK_WNDPROC    = 0x60   # Install WndProc subclass to log keyboard msgs
+CMD_UNHOOK_WNDPROC  = 0x61   # Remove WndProc subclass
+CMD_CHECK_RAW_INPUT = 0x62   # Check if game imports Raw Input API
+CMD_WNDPROC_STATUS  = 0x63   # Read WndProc message counters
+CMD_KB_DIAG         = 0x64   # Keyboard input diagnostic
+
+# Bot Control
+CMD_BOT_STATUS      = 0x70   # Get bot status → str_result
+CMD_BOT_TOGGLE      = 0x71   # Toggle feature: param1=feature, param2=value
+CMD_BOT_SET_TIMER   = 0x72   # Set timer: param1=timer_id, param2=interval_ms
+
 CMD_PING            = 0xFE
 
 # Status
@@ -101,40 +114,119 @@ kernel32.UnmapViewOfFile.restype = wt.BOOL
 FILE_MAP_ALL_ACCESS = 0x000F001F
 
 
-def open_shmem() -> tuple | None:
+def open_shmem(name: str = SHMEM_NAME_LEGACY) -> tuple | None:
     """Open the shared memory created by phantom_hook DLL."""
-    # Use Win32 OpenFileMappingA to get handle
     handle = kernel32.OpenFileMappingA(
         FILE_MAP_ALL_ACCESS,
         False,
-        SHMEM_NAME.encode("ascii"),
+        name.encode("ascii"),
     )
     if not handle:
         return None
 
-    # Map the view
     ptr = kernel32.MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, SHMEM_SIZE)
     if not ptr:
         kernel32.CloseHandle(handle)
         return None
 
-    # Wrap in a ctypes buffer we can read/write
     buf = (ctypes.c_char * SHMEM_SIZE).from_address(ptr)
     return handle, ptr, buf
 
 
-class PhantomCmd:
-    """Interface to phantom_hook DLL command shared memory."""
+def _get_ge_pids() -> list[int]:
+    """Get all ge.exe PIDs via tasklist."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq ge.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, creationflags=0x08000000  # CREATE_NO_WINDOW
+        )
+        pids = []
+        for line in result.stdout.strip().split("\n"):
+            if line.strip() and "ge.exe" in line.lower():
+                parts = line.strip().strip('"').split('","')
+                if len(parts) >= 2:
+                    try:
+                        pids.append(int(parts[1].strip('"')))
+                    except ValueError:
+                        pass
+        return pids
+    except Exception:
+        return []
 
-    def __init__(self):
-        result = open_shmem()
+
+class PhantomCmd:
+    """Interface to phantom_hook DLL command shared memory.
+
+    Usage:
+        cmd = PhantomCmd()           # auto-discover first available
+        cmd = PhantomCmd(pid=1234)   # connect to specific PID
+    """
+
+    def __init__(self, pid: int | None = None):
+        self._pid = pid
+        self._shmem_name = None
+
+        if pid is not None:
+            # Try per-PID name first, fall back to legacy
+            name = SHMEM_NAME_FMT % pid
+            result = open_shmem(name)
+            if result is None:
+                result = open_shmem(SHMEM_NAME_LEGACY)
+                name = SHMEM_NAME_LEGACY
+            self._shmem_name = name
+        else:
+            # Auto-discover: try all ge.exe PIDs, then legacy
+            for p in _get_ge_pids():
+                name = SHMEM_NAME_FMT % p
+                result = open_shmem(name)
+                if result is not None:
+                    self._pid = p
+                    self._shmem_name = name
+                    break
+            else:
+                # Fall back to legacy (old DLL without per-PID naming)
+                result = open_shmem(SHMEM_NAME_LEGACY)
+                self._shmem_name = SHMEM_NAME_LEGACY
+
         if result is None:
             raise RuntimeError(
                 "Cannot open shared memory. Is phantom_hook.dll injected?\n"
-                f"  Shared memory name: {SHMEM_NAME}"
+                f"  Tried: per-PID shmem + legacy ({SHMEM_NAME_LEGACY})"
             )
         self._handle, self._ptr, self._buf = result
-        self._seq = 0  # Command sequence counter (0-255, wrapping)
+        self._seq = 0
+
+    @property
+    def pid(self) -> int | None:
+        return self._pid
+
+    @property
+    def shmem_name(self) -> str | None:
+        return self._shmem_name
+
+    @staticmethod
+    def discover() -> list[dict]:
+        """Scan for all ge.exe processes with phantom_hook shmem.
+        Returns list of {pid, shmem_name} for connected instances."""
+        found = []
+        for pid in _get_ge_pids():
+            name = SHMEM_NAME_FMT % pid
+            result = open_shmem(name)
+            if result is not None:
+                handle, ptr, buf = result
+                kernel32.UnmapViewOfFile(ptr)
+                kernel32.CloseHandle(handle)
+                found.append({"pid": pid, "shmem_name": name})
+        # Also check legacy
+        result = open_shmem(SHMEM_NAME_LEGACY)
+        if result is not None:
+            handle, ptr, buf = result
+            kernel32.UnmapViewOfFile(ptr)
+            kernel32.CloseHandle(handle)
+            if not any(f["shmem_name"] == SHMEM_NAME_LEGACY for f in found):
+                found.append({"pid": None, "shmem_name": SHMEM_NAME_LEGACY})
+        return found
 
     def close(self):
         if self._ptr:
@@ -480,6 +572,116 @@ class PhantomCmd:
             return self._read_u32(OFF_RESULT_I32)
         return 0
 
+    def key_combo(self, key: str | int, ctrl: bool = False,
+                  shift: bool = False, alt: bool = False) -> bool:
+        """Send a key combo (modifiers + key) via keybd_event.
+        Example: key_combo('q', ctrl=True) → Ctrl+Q"""
+        if isinstance(key, int):
+            vk = key
+        elif len(key) == 1:
+            vk = ord(key.upper())
+        else:
+            vk = self.VK_MAP.get(key.lower(), 0)
+            if vk == 0:
+                return False
+
+        mods = (1 if ctrl else 0) | (2 if shift else 0) | (4 if alt else 0)
+        self._write_u32(OFF_PARAM1, vk)
+        self._write_u32(OFF_PARAM2, mods)
+        status = self._send_cmd(CMD_KEY_COMBO)
+        return status == STATUS_DONE
+
+    # ── Bot Control ──────────────────────────────────────────
+
+    def bot_status(self) -> dict | None:
+        """Get current bot state. Returns dict with enabled, pick, attack, skills, items."""
+        status = self._send_cmd(CMD_BOT_STATUS)
+        if status == STATUS_DONE:
+            return {
+                "enabled": self._read_u32(OFF_RESULT_I32) != 0,
+                "info": self._read_str(OFF_STR_RESULT),
+            }
+        return None
+
+    def bot_toggle(self, feature: str, value: int = -1) -> bool:
+        """Toggle a bot feature.
+        feature: 'master', 'pick', 'attack'
+        value: 0=off, 1=on, -1=toggle"""
+        feature_map = {"master": 0, "pick": 1, "attack": 2}
+        fid = feature_map.get(feature)
+        if fid is None:
+            return False
+        self._write_u32(OFF_PARAM1, fid)
+        self._write_u32(OFF_PARAM2, value & 0xFFFFFFFF)
+        status = self._send_cmd(CMD_BOT_TOGGLE)
+        return status == STATUS_DONE
+
+    def bot_set_timer(self, timer_id: int, interval_ms: int) -> bool:
+        """Set a bot timer interval.
+        Timer IDs:
+          0 = pick_interval, 1 = attack_interval
+          0x10-0x15 = PC1 skills, 0x20-0x25 = PC2, 0x30-0x35 = PC3
+          0x40-0x4B = items F1-F12
+        interval_ms: 0 = disable"""
+        self._write_u32(OFF_PARAM1, timer_id)
+        self._write_u32(OFF_PARAM2, interval_ms)
+        status = self._send_cmd(CMD_BOT_SET_TIMER)
+        return status == STATUS_DONE
+
+    def bot_set_skill(self, char_idx: int, skill_idx: int, interval_ms: int) -> bool:
+        """Set skill timer. char_idx: 0=PC1, 1=PC2, 2=PC3. skill_idx: 0-5."""
+        timer_id = ((char_idx + 1) << 4) | skill_idx
+        return self.bot_set_timer(timer_id, interval_ms)
+
+    def bot_set_item(self, slot: int, interval_ms: int) -> bool:
+        """Set item timer. slot: 0-11 (F1-F12)."""
+        return self.bot_set_timer(0x40 + slot, interval_ms)
+
+    # ── Phase 6: Keyboard Input Discovery ─────────────────────
+
+    def hook_wndproc(self) -> bool:
+        """Install WndProc subclass to log all keyboard messages.
+        Deferred to main game thread — may take a moment."""
+        status = self._send_cmd(CMD_HOOK_WNDPROC, timeout=10.0)
+        return status == STATUS_DONE
+
+    def unhook_wndproc(self) -> bool:
+        """Remove WndProc subclass, restore original.
+        Deferred to main game thread."""
+        status = self._send_cmd(CMD_UNHOOK_WNDPROC, timeout=10.0)
+        return status == STATUS_DONE
+
+    def check_raw_input(self) -> tuple[int, str]:
+        """Check if ge.exe imports Raw Input API functions.
+        Returns (count_found, details_string)."""
+        status = self._send_cmd(CMD_CHECK_RAW_INPUT, timeout=10.0)
+        if status == STATUS_DONE:
+            count = self._read_u32(OFF_RESULT_I32)
+            details = self._read_str(OFF_STR_RESULT)
+            return count, details
+        return -1, "error"
+
+    def kb_diag(self) -> tuple[int, str]:
+        """Full keyboard input diagnostic.
+        Checks dinput8.dll, installs API hooks, reports call counts.
+        Returns (dinput8_loaded, details_string)."""
+        status = self._send_cmd(CMD_KB_DIAG, timeout=10.0)
+        if status == STATUS_DONE:
+            di8 = self._read_u32(OFF_RESULT_I32)
+            info = self._read_str(OFF_STR_RESULT)
+            return di8, info
+        return -1, "error"
+
+    def wndproc_status(self) -> tuple[int, str]:
+        """Read WndProc hook message counters.
+        Returns (total_count, status_string)."""
+        status = self._send_cmd(CMD_WNDPROC_STATUS)
+        if status == STATUS_DONE:
+            total = self._read_u32(OFF_RESULT_I32)
+            info = self._read_str(OFF_STR_RESULT)
+            return total, info
+        return -1, "error"
+
 
 # ── CLI Commands ──────────────────────────────────────────────
 
@@ -589,8 +791,9 @@ def cmd_probe(args):
 
 def cmd_interactive(args):
     """Interactive command loop."""
+    pid = getattr(args, "pid", None)
     try:
-        cmd = PhantomCmd()
+        cmd = PhantomCmd(pid=pid)
     except RuntimeError as e:
         print(f"[!] {e}")
         return 1
@@ -600,7 +803,8 @@ def cmd_interactive(args):
         cmd.close()
         return 1
 
-    print("[+] Connected to phantom_hook DLL")
+    pid_str = f" (PID {cmd.pid})" if cmd.pid else ""
+    print(f"[+] Connected to phantom_hook DLL{pid_str} via {cmd.shmem_name}")
     print()
     print("Commands:")
     print("  ping                 — Ping DLL")
@@ -629,6 +833,20 @@ def cmd_interactive(args):
     print("  keydown <key>            — Hold key down")
     print("  keyup <key>              — Release key")
     print("  keys <sequence> [delay]  — Type a sequence (e.g., keys qwerty 100)")
+    print("  combo <key> [ctrl] [shift] [alt] — Key combo (e.g., combo space ctrl)")
+    print("  --- Bot Control ---")
+    print("  bot                      — Show bot status")
+    print("  bot on/off               — Master bot toggle")
+    print("  bot pick on/off          — Auto pick toggle")
+    print("  bot attack on/off        — Auto attack toggle")
+    print("  bot skill <c> <s> <ms>   — Set skill timer (char 0-2, skill 0-5, ms)")
+    print("  bot item <slot> <ms>     — Set item timer (slot 0-11, ms)")
+    print("  discover                 — Scan for all injected game instances")
+    print("  --- Phase 6: KB Input Discovery ---")
+    print("  hookwnd                  — Hook WndProc to log ALL keyboard messages")
+    print("  unhookwnd                — Remove WndProc hook")
+    print("  wndstatus                — Show keyboard message counters")
+    print("  rawinput                 — Check if game imports Raw Input API")
     print("  --- Phase 3: VTable ---")
     print("  spy                  — One-shot vtable spy at xref #1 (getter)")
     print("  spy2                 — One-shot vtable spy at xref #2 (SETTER site)")
@@ -932,6 +1150,38 @@ def cmd_interactive(args):
                 else:
                     print(f"  [!] failed")
 
+            elif verb == "postkey":
+                # PostMessageW with correct lParam (scan code + repeat)
+                if len(parts) < 2:
+                    print("Usage: postkey <key>  — PostMessage with correct lParam")
+                    continue
+                key_str = parts[1]
+                if key_str.startswith("0x"):
+                    key_arg = int(key_str, 16)
+                else:
+                    key_arg = key_str
+                print(f"[*] PostMessageW with scan code: '{key_str}'")
+                if cmd.send_key(key_arg, flags=6):
+                    print(f"  [+] postkey '{key_str}' sent (no focus needed)")
+                else:
+                    print(f"  [!] failed")
+
+            elif verb == "sendkey":
+                # SendMessageW with correct lParam (sync)
+                if len(parts) < 2:
+                    print("Usage: sendkey <key>  — SendMessage with correct lParam")
+                    continue
+                key_str = parts[1]
+                if key_str.startswith("0x"):
+                    key_arg = int(key_str, 16)
+                else:
+                    key_arg = key_str
+                print(f"[*] SendMessageW with scan code: '{key_str}'")
+                if cmd.send_key(key_arg, flags=7):
+                    print(f"  [+] sendkey '{key_str}' sent (sync, no focus)")
+                else:
+                    print(f"  [!] failed")
+
             elif verb == "keys":
                 if len(parts) < 2:
                     print("Usage: keys <sequence> [delay_ms]")
@@ -945,6 +1195,136 @@ def cmd_interactive(args):
                     print(f"  [+] sent {sent} keys")
                 else:
                     print(f"  [!] failed")
+
+            elif verb == "combo":
+                if len(parts) < 2:
+                    print("Usage: combo <key> [ctrl] [shift] [alt]")
+                    print("  e.g.: combo space ctrl   → Ctrl+Space")
+                    print("  e.g.: combo q ctrl shift → Ctrl+Shift+Q")
+                    continue
+                key_arg = parts[1]
+                mods = [m.lower() for m in parts[2:]]
+                if cmd.key_combo(key_arg, ctrl="ctrl" in mods, shift="shift" in mods, alt="alt" in mods):
+                    print(f"  [+] combo sent")
+                else:
+                    print(f"  [!] failed")
+
+            # ── Bot Control ───────────────────────────────────
+
+            elif verb == "bot":
+                if len(parts) == 1:
+                    # bot status
+                    result = cmd.bot_status()
+                    if result:
+                        print(f"  Bot: {'ON' if result['enabled'] else 'OFF'}")
+                        print(f"  {result['info']}")
+                    else:
+                        print("  [!] failed")
+                elif parts[1].lower() in ("on", "off"):
+                    val = 1 if parts[1].lower() == "on" else 0
+                    if cmd.bot_toggle("master", val):
+                        print(f"  [+] Bot master: {'ON' if val else 'OFF'}")
+                    else:
+                        print("  [!] failed")
+                elif parts[1].lower() == "pick":
+                    if len(parts) < 3:
+                        cmd.bot_toggle("pick", -1)  # toggle
+                    else:
+                        val = 1 if parts[2].lower() == "on" else 0
+                        cmd.bot_toggle("pick", val)
+                    print("  [+] pick toggled")
+                elif parts[1].lower() == "attack":
+                    if len(parts) < 3:
+                        cmd.bot_toggle("attack", -1)
+                    else:
+                        val = 1 if parts[2].lower() == "on" else 0
+                        cmd.bot_toggle("attack", val)
+                    print("  [+] attack toggled")
+                elif parts[1].lower() == "skill":
+                    if len(parts) < 5:
+                        print("Usage: bot skill <char 0-2> <skill 0-5> <interval_ms>")
+                        continue
+                    c, s, ms = int(parts[2]), int(parts[3]), int(parts[4])
+                    if cmd.bot_set_skill(c, s, ms):
+                        print(f"  [+] PC{c+1} skill{s+1}: {ms}ms")
+                    else:
+                        print("  [!] failed")
+                elif parts[1].lower() == "item":
+                    if len(parts) < 4:
+                        print("Usage: bot item <slot 0-11> <interval_ms>")
+                        continue
+                    slot, ms = int(parts[2]), int(parts[3])
+                    if cmd.bot_set_item(slot, ms):
+                        print(f"  [+] item F{slot+1}: {ms}ms")
+                    else:
+                        print("  [!] failed")
+                else:
+                    print("Usage: bot [on|off|pick|attack|skill|item]")
+
+            elif verb == "discover":
+                instances = PhantomCmd.discover()
+                if instances:
+                    print(f"[+] Found {len(instances)} injected instance(s):")
+                    for inst in instances:
+                        pid_str = str(inst["pid"]) if inst["pid"] else "legacy"
+                        print(f"  PID {pid_str} — {inst['shmem_name']}")
+                else:
+                    print("[!] No injected instances found")
+
+            # ── Phase 6: Keyboard Input Discovery ─────────────
+
+            elif verb == "hookwnd":
+                print("[*] Installing WndProc hook (deferred to main thread)...")
+                print("    This intercepts ALL keyboard messages to the game window.")
+                if cmd.hook_wndproc():
+                    print("[+] WndProc hook INSTALLED — press keys in-game, then 'wndstatus'")
+                else:
+                    print("[!] Failed to install WndProc hook (check log)")
+
+            elif verb == "unhookwnd":
+                print("[*] Removing WndProc hook...")
+                if cmd.unhook_wndproc():
+                    print("[+] WndProc hook removed — original WndProc restored")
+                else:
+                    print("[!] Failed to remove WndProc hook")
+
+            elif verb == "rawinput":
+                print("[*] Checking ge.exe IAT for Raw Input API imports...")
+                count, details = cmd.check_raw_input()
+                if count > 0:
+                    print(f"[+] Found {count} Raw Input import(s)! ({details})")
+                    print("    Game likely uses WM_INPUT for keyboard — check log for details")
+                elif count == 0:
+                    print(f"[-] No Raw Input imports in IAT ({details})")
+                    print("    Game does NOT use RegisterRawInputDevices/GetRawInputData")
+                    print("    Check phantom_hook.log for full user32 import list")
+                else:
+                    print(f"[!] Check failed: {details}")
+
+            elif verb == "kbdiag":
+                print("[*] Running full keyboard input diagnostic...")
+                di8, info = cmd.kb_diag()
+                print(f"[+] {info}")
+                if di8 == 1:
+                    print("    !! dinput8.dll is LOADED — game likely uses DirectInput for keyboard!")
+                    print("    Background keys need DI device hook, not message-based approach")
+                elif di8 == 0:
+                    print("    dinput8.dll NOT loaded — game uses Win32 API for keyboard")
+                print("    GKS = GetKeyState calls (faked/total)")
+                print("    GAKS = GetAsyncKeyState calls (faked/total)")
+                print("    Run 'postkey q', then 'kbdiag' again to see if counts change")
+                print("    Check phantom_hook log for full details")
+
+            elif verb == "wndstatus":
+                total, info = cmd.wndproc_status()
+                if total >= 0:
+                    print(f"[+] WndProc status: {info}")
+                    print(f"    Total keyboard messages: {total}")
+                    print("    Legend: KD=KEYDOWN KU=KEYUP CH=CHAR SKD=SYSKEYDOWN")
+                    print("            SKU=SYSKEYUP IN=WM_INPUT HK=HOTKEY OT=other")
+                    print("    Check phantom_hook.log for per-message details")
+                else:
+                    print(f"[!] Status read failed: {info}")
 
             # ── Phase 3: VTable commands ──────────────────────
 
@@ -1053,6 +1433,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="GE_Phantom Range Control — Phase 2 command interface"
     )
+    parser.add_argument("--pid", type=int, default=None,
+                        help="Target ge.exe PID (auto-discovers if not specified)")
     sub = parser.add_subparsers(dest="command")
 
     # ping

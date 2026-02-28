@@ -25,8 +25,11 @@
 
 #include "phantom_hook.h"
 
+#include <objbase.h>    /* CoInitializeEx / CoUninitialize */
+
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "ole32.lib")
 
 /* ─── Debug Log ───────────────────────────────────────────────── */
 
@@ -164,6 +167,855 @@ static HWND find_game_window(void)
 
 /* ── Keyboard Input ──────────────────────────────────────────── */
 static DWORD g_key_hold_ms = 60;  /* keybd_event hold duration in ms */
+
+/* Forward declarations (defined later in hook infrastructure section) */
+static BOOL iat_hook(HMODULE hModule, const char *target_dll,
+                     void *original_func, void *hook_func, void **out_original);
+static BOOL inline_hook(void *target, void *hook, BYTE *saved_bytes);
+static void inline_unhook(void *target, BYTE *saved_bytes);
+
+/* Forward declaration for bot hotkey handler (defined in bot control section) */
+static BOOL handle_bot_hotkey(BYTE vk, BOOL ctrl, BOOL shift, BOOL alt);
+
+/* ── Phase 6b: Keyboard State API Hooks ──────────────────────── */
+
+/*
+ * Hook GetKeyState AND GetAsyncKeyState to:
+ * 1. Return "pressed" (0x8000) for the VK we're faking via PostMessage
+ * 2. Count calls to discover which API the game actually uses for input
+ */
+typedef SHORT (WINAPI *fn_GetKeyState)(int nVirtKey);
+typedef SHORT (WINAPI *fn_GetAsyncKeyState)(int vKey);
+
+static fn_GetKeyState      g_orig_GetKeyState      = NULL;
+static fn_GetAsyncKeyState g_orig_GetAsyncKeyState  = NULL;
+
+static volatile BOOL  g_keystate_hooked      = FALSE;
+static volatile BOOL  g_asynckeystate_hooked = FALSE;
+
+static volatile DWORD g_fake_vk = 0;          /* VK to fake as "pressed", 0 = none */
+static volatile LONG  g_keystate_hook_count      = 0;
+static volatile LONG  g_asynckeystate_hook_count = 0;
+static volatile LONG  g_keystate_total_calls     = 0;  /* ALL calls, not just faked */
+static volatile LONG  g_asynckeystate_total_calls = 0;
+
+static SHORT WINAPI hooked_GetKeyState(int nVirtKey)
+{
+    InterlockedIncrement(&g_keystate_total_calls);
+    if (g_fake_vk != 0 && (DWORD)nVirtKey == g_fake_vk) {
+        InterlockedIncrement(&g_keystate_hook_count);
+        return (SHORT)0x8000;
+    }
+    return g_orig_GetKeyState(nVirtKey);
+}
+
+static SHORT WINAPI hooked_GetAsyncKeyState(int vKey)
+{
+    InterlockedIncrement(&g_asynckeystate_total_calls);
+    if (g_fake_vk != 0 && (DWORD)vKey == g_fake_vk) {
+        InterlockedIncrement(&g_asynckeystate_hook_count);
+        return (SHORT)0x8001;  /* pressed + toggled */
+    }
+    return g_orig_GetAsyncKeyState(vKey);
+}
+
+static BOOL install_keystate_hook(void)
+{
+    HMODULE hExe = GetModuleHandleA(NULL);
+    HMODULE hUser32 = GetModuleHandleA("user32.dll");
+    void *real_gks, *real_gaks;
+
+    if (g_keystate_hooked && g_asynckeystate_hooked) return TRUE;
+    if (!hUser32) return FALSE;
+
+    /* Hook GetKeyState */
+    if (!g_keystate_hooked) {
+        real_gks = (void *)GetProcAddress(hUser32, "GetKeyState");
+        if (real_gks && iat_hook(hExe, "user32.dll", real_gks, hooked_GetKeyState, (void **)&g_orig_GetKeyState)) {
+            g_keystate_hooked = TRUE;
+            log_write("install_keystate_hook: GetKeyState OK orig=%p", g_orig_GetKeyState);
+        } else {
+            log_write("install_keystate_hook: GetKeyState IAT hook FAILED");
+        }
+    }
+
+    /* Hook GetAsyncKeyState */
+    if (!g_asynckeystate_hooked) {
+        real_gaks = (void *)GetProcAddress(hUser32, "GetAsyncKeyState");
+        if (real_gaks && iat_hook(hExe, "user32.dll", real_gaks, hooked_GetAsyncKeyState, (void **)&g_orig_GetAsyncKeyState)) {
+            g_asynckeystate_hooked = TRUE;
+            log_write("install_keystate_hook: GetAsyncKeyState OK orig=%p", g_orig_GetAsyncKeyState);
+        } else {
+            log_write("install_keystate_hook: GetAsyncKeyState IAT hook FAILED");
+        }
+    }
+
+    return g_keystate_hooked || g_asynckeystate_hooked;
+}
+
+static void remove_keystate_hook(void)
+{
+    HMODULE hExe;
+
+    hExe = GetModuleHandleA(NULL);
+
+    if (g_keystate_hooked && g_orig_GetKeyState) {
+        iat_hook(hExe, "user32.dll", hooked_GetKeyState, g_orig_GetKeyState, NULL);
+        g_keystate_hooked = FALSE;
+    }
+    if (g_asynckeystate_hooked && g_orig_GetAsyncKeyState) {
+        iat_hook(hExe, "user32.dll", hooked_GetAsyncKeyState, g_orig_GetAsyncKeyState, NULL);
+        g_asynckeystate_hooked = FALSE;
+    }
+
+    g_fake_vk = 0;
+    log_write("remove_keystate_hook: restored (triggered %d times)", (int)g_keystate_hook_count);
+}
+
+/* ── Phase 6c: DirectInput Keyboard Hook ─────────────────────── */
+
+/*
+ * The game uses DirectInput8 for keyboard input (dinput8.dll is loaded).
+ * We hook IDirectInputDevice8::GetDeviceState to inject fake key presses
+ * into the 256-byte keyboard state buffer. This works WITHOUT focus
+ * because we modify the output AFTER the real call returns.
+ *
+ * GetDeviceState returns a 256-byte buffer where each byte is a key state.
+ * Index = DIK code (== hardware scan code). Bit 0x80 = key pressed.
+ * DIK codes: DIK_Q=0x10, DIK_W=0x11, DIK_SPACE=0x39, DIK_F1=0x3B, etc.
+ * Same as scan codes from MapVirtualKey(vk, MAPVK_VK_TO_VSC).
+ */
+
+/* GUIDs we need — defined manually to avoid dinput.h dependency */
+static const GUID GUID_SysKeyboard_  = {0x6F1D2B61, 0xD5A0, 0x11CF, {0xBF, 0xD4, 0x00, 0xAA, 0x00, 0x5F, 0x58, 0x42}};
+static const GUID IID_IDirectInput8A_ = {0xBF798030, 0x483A, 0x4DA2, {0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00}};
+
+/* c_dfDIKeyboard — standard 256-byte keyboard data format */
+/* We only need the format GUID for SetDataFormat, but we can use the address
+ * from dinput8.dll. For simplicity, we'll just call SetCooperativeLevel +
+ * SetDataFormat using the known structure. */
+
+typedef HRESULT (WINAPI *fn_DirectInput8Create)(HINSTANCE, DWORD, const GUID *, void **, void *);
+
+/* IDirectInputDevice8::GetDeviceState signature (COM __stdcall) */
+typedef HRESULT (__stdcall *fn_DIGetDeviceState)(void *pThis, DWORD cbData, void *lpvData);
+
+static fn_DIGetDeviceState g_orig_DIGetDeviceState = NULL;
+static volatile BOOL  g_di_hooked = FALSE;
+static volatile DWORD g_fake_dik  = 0;     /* DIK scan code to fake, 0 = none */
+static volatile LONG  g_di_hook_inject_count = 0;  /* times we injected a fake key */
+static volatile LONG  g_di_hook_call_count = 0;     /* total GetDeviceState calls */
+static BYTE g_di_orig_bytes[5];  /* saved bytes for inline hook */
+static CRITICAL_SECTION g_di_lock;
+static BOOL g_di_lock_inited = FALSE;
+
+static HRESULT __stdcall hooked_DIGetDeviceState(void *pThis, DWORD cbData, void *lpvData)
+{
+    HRESULT hr;
+    DWORD fake;
+
+    InterlockedIncrement(&g_di_hook_call_count);
+
+    /* Call original: unhook → call → rehook (trampoline-less) */
+    EnterCriticalSection(&g_di_lock);
+    inline_unhook((void *)g_orig_DIGetDeviceState, g_di_orig_bytes);
+    hr = g_orig_DIGetDeviceState(pThis, cbData, lpvData);
+    inline_hook((void *)g_orig_DIGetDeviceState, hooked_DIGetDeviceState, g_di_orig_bytes);
+    LeaveCriticalSection(&g_di_lock);
+
+    /* Inject fake key into the returned buffer */
+    fake = g_fake_dik;
+    if (fake != 0 && fake < cbData && SUCCEEDED(hr) && lpvData) {
+        ((BYTE *)lpvData)[fake] |= 0x80;
+        InterlockedIncrement(&g_di_hook_inject_count);
+    }
+
+    return hr;
+}
+
+static BOOL install_di_keyboard_hook(void)
+{
+    HMODULE hDI8;
+    fn_DirectInput8Create pfnCreate;
+    void *pDI = NULL;       /* IDirectInput8A* */
+    void *pDevice = NULL;   /* IDirectInputDevice8A* */
+    void **vtable;
+    fn_DIGetDeviceState realGetDeviceState;
+    HRESULT hr;
+
+    if (g_di_hooked) return TRUE;
+
+    /* COM must be initialized on this thread for CreateDevice to work */
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    hDI8 = GetModuleHandleA("dinput8.dll");
+    if (!hDI8) {
+        log_write("install_di_keyboard_hook: dinput8.dll not loaded");
+        CoUninitialize();
+        return FALSE;
+    }
+
+    {
+        char di8path[MAX_PATH] = {0};
+        GetModuleFileNameA(hDI8, di8path, MAX_PATH);
+        log_write("install_di_keyboard_hook: dinput8.dll path=%s", di8path);
+    }
+
+    pfnCreate = (fn_DirectInput8Create)GetProcAddress(hDI8, "DirectInput8Create");
+    if (!pfnCreate) {
+        log_write("install_di_keyboard_hook: DirectInput8Create not found");
+        CoUninitialize();
+        return FALSE;
+    }
+
+    /* Create temporary DI8 interface to discover vtable */
+    log_write("install_di_keyboard_hook: dinput8.dll=%p pfnCreate=%p", hDI8, pfnCreate);
+    hr = pfnCreate(GetModuleHandleA(NULL), 0x0800 /* DIRECTINPUT_VERSION 8.0 */,
+                   &IID_IDirectInput8A_, &pDI, NULL);
+    log_write("install_di_keyboard_hook: DirectInput8Create hr=0x%08X pDI=%p", hr, pDI);
+    if (FAILED(hr) || !pDI) {
+        log_write("install_di_keyboard_hook: DirectInput8Create FAILED");
+        CoUninitialize();
+        return FALSE;
+    }
+
+    /* CreateDevice(GUID_SysKeyboard) — vtable[3] */
+    {
+        void **di_vtable = *(void ***)pDI;
+        typedef HRESULT (__stdcall *fn_CreateDevice)(void *, const GUID *, void **, void *);
+        fn_CreateDevice pCreateDevice;
+
+        log_write("install_di_keyboard_hook: pDI vtable=%p [0]=%p [1]=%p [2]=%p [3]=%p",
+                  di_vtable, di_vtable[0], di_vtable[1], di_vtable[2], di_vtable[3]);
+
+        pCreateDevice = (fn_CreateDevice)di_vtable[3];
+        log_write("install_di_keyboard_hook: calling CreateDevice(%p, GUID_SysKeyboard, ...)", pDI);
+
+        hr = pCreateDevice(pDI, &GUID_SysKeyboard_, &pDevice, NULL);
+        if (FAILED(hr) || !pDevice) {
+            log_write("install_di_keyboard_hook: CreateDevice failed hr=0x%08X — trying fallback", hr);
+
+            /* Fallback: scan dinput8.dll .rdata for IDirectInputDevice8 vtable.
+               We look for an array of 32+ function pointers that all point into
+               dinput8.dll's code range. The device vtable has ~32 entries. */
+            {
+                IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)hDI8;
+                IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)hDI8 + dos->e_lfanew);
+                IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
+                DWORD s;
+                BYTE *codeStart = NULL, *codeEnd = NULL;
+                void **found_vtable = NULL;
+
+                /* Find code section */
+                for (s = 0; s < nt->FileHeader.NumberOfSections; s++) {
+                    BYTE *sbase = (BYTE *)hDI8 + sec[s].VirtualAddress;
+                    DWORD ssize = sec[s].Misc.VirtualSize;
+                    if (sec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE) {
+                        codeStart = sbase;
+                        codeEnd = sbase + ssize;
+                    }
+                }
+
+                log_write("install_di_keyboard_hook: code=%p-%p imageSize=0x%X",
+                          codeStart, codeEnd, nt->OptionalHeader.SizeOfImage);
+
+                if (codeStart) {
+                    /* Scan ALL non-code sections for vtable candidates */
+                    for (s = 0; s < nt->FileHeader.NumberOfSections; s++) {
+                        BYTE *sbase = (BYTE *)hDI8 + sec[s].VirtualAddress;
+                        DWORD ssize = sec[s].Misc.VirtualSize;
+                        DWORD i;
+
+                        if (sec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE) continue;
+                        if (!(sec[s].Characteristics & IMAGE_SCN_MEM_READ)) continue;
+
+                        log_write("install_di_keyboard_hook: scanning section %.8s %p-%p (0x%X chars)",
+                                  sec[s].Name, sbase, sbase + ssize, sec[s].Characteristics);
+
+                        for (i = 0; i + 20 * sizeof(void *) <= ssize; i += sizeof(void *)) {
+                            void **candidate = (void **)(sbase + i);
+                            int good = 0, j;
+                            for (j = 0; j < 20; j++) {
+                                BYTE *p = (BYTE *)candidate[j];
+                                if (p >= codeStart && p < codeEnd)
+                                    good++;
+                                else
+                                    break;
+                            }
+                            if (good >= 20) {
+                                int total = 0;
+                                if (candidate == di_vtable) continue;
+                                for (j = 0; j < 40; j++) {
+                                    BYTE *p = (BYTE *)candidate[j];
+                                    if (p >= codeStart && p < codeEnd)
+                                        total++;
+                                    else
+                                        break;
+                                }
+                                log_write("install_di_keyboard_hook: vtable candidate at %p (%d entries) [9]=%p",
+                                          candidate, total, candidate[9]);
+                                if (total >= 25 && !found_vtable) {
+                                    found_vtable = candidate;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                /* Release DI8 */
+                ((HRESULT (__stdcall *)(void *))di_vtable[2])(pDI);
+                CoUninitialize();
+
+                if (found_vtable) {
+                    realGetDeviceState = (fn_DIGetDeviceState)found_vtable[9];
+                    log_write("install_di_keyboard_hook: fallback found vtable=%p GetDeviceState=%p", found_vtable, realGetDeviceState);
+                    goto do_hook;
+                }
+                log_write("install_di_keyboard_hook: fallback scan found no device vtable");
+                return FALSE;
+            }
+        }
+    }
+
+    /* Read GetDeviceState address from device vtable[9] */
+    vtable = *(void ***)pDevice;
+    realGetDeviceState = (fn_DIGetDeviceState)vtable[9];
+    log_write("install_di_keyboard_hook: GetDeviceState = %p", realGetDeviceState);
+
+    /* Release temp objects — vtable[2] = Release */
+    ((HRESULT (__stdcall *)(void *))(*(void ***)pDevice)[2])(pDevice);
+    ((HRESULT (__stdcall *)(void *))(*(void ***)pDI)[2])(pDI);
+
+    CoUninitialize();
+
+do_hook:
+
+    /* Init critical section for unhook/rehook */
+    if (!g_di_lock_inited) {
+        InitializeCriticalSection(&g_di_lock);
+        g_di_lock_inited = TRUE;
+    }
+
+    /* Inline-hook GetDeviceState */
+    g_orig_DIGetDeviceState = realGetDeviceState;
+    if (!inline_hook((void *)realGetDeviceState, hooked_DIGetDeviceState, g_di_orig_bytes)) {
+        log_write("install_di_keyboard_hook: inline_hook FAILED");
+        return FALSE;
+    }
+
+    g_di_hooked = TRUE;
+    g_di_hook_call_count = 0;
+    g_di_hook_inject_count = 0;
+    log_write("install_di_keyboard_hook: OK — hooked GetDeviceState at %p", realGetDeviceState);
+    return TRUE;
+}
+
+static void remove_di_keyboard_hook(void)
+{
+    if (!g_di_hooked || !g_orig_DIGetDeviceState) return;
+
+    inline_unhook((void *)g_orig_DIGetDeviceState, g_di_orig_bytes);
+    g_di_hooked = FALSE;
+    g_fake_dik = 0;
+    log_write("remove_di_keyboard_hook: restored (injected %d, total %d calls)",
+              (int)g_di_hook_inject_count, (int)g_di_hook_call_count);
+}
+
+/* ── Phase 6: WndProc Message Spy ────────────────────────────── */
+
+static WNDPROC g_orig_wndproc = NULL;
+static volatile BOOL g_wndproc_hooked = FALSE;
+
+/* Per-type message counters (atomically incremented from WndProc) */
+static volatile LONG g_wnd_keydown    = 0;   /* WM_KEYDOWN    0x0100 */
+static volatile LONG g_wnd_keyup      = 0;   /* WM_KEYUP      0x0101 */
+static volatile LONG g_wnd_char       = 0;   /* WM_CHAR        0x0102 */
+static volatile LONG g_wnd_syskeydown = 0;   /* WM_SYSKEYDOWN 0x0104 */
+static volatile LONG g_wnd_syskeyup   = 0;   /* WM_SYSKEYUP   0x0105 */
+static volatile LONG g_wnd_input      = 0;   /* WM_INPUT      0x00FF */
+static volatile LONG g_wnd_hotkey     = 0;   /* WM_HOTKEY     0x0312 */
+static volatile LONG g_wnd_other_kb   = 0;   /* other keyboard msgs   */
+
+/* Ring buffer for recent keyboard messages */
+#define WNDPROC_LOG_SIZE 32
+
+typedef struct {
+    DWORD tick;
+    UINT  msg;
+    DWORD wParam;
+    DWORD lParam;
+} WndProcLogEntry;
+
+static WndProcLogEntry g_wndproc_log[WNDPROC_LOG_SIZE];
+static volatile LONG g_wndproc_log_idx = 0;
+
+static BOOL is_keyboard_msg(UINT msg)
+{
+    return (msg >= 0x0100 && msg <= 0x0109)   /* WM_KEYFIRST..WM_KEYLAST */
+        || msg == 0x00FF                       /* WM_INPUT */
+        || msg == 0x0312                       /* WM_HOTKEY */
+        || msg == 0x0290                       /* WM_IME_KEYDOWN */
+        || msg == 0x0291;                      /* WM_IME_KEYUP */
+}
+
+static const char *kb_msg_name(UINT msg)
+{
+    switch (msg) {
+    case 0x0100: return "KEYDOWN";
+    case 0x0101: return "KEYUP";
+    case 0x0102: return "CHAR";
+    case 0x0103: return "DEADCHAR";
+    case 0x0104: return "SYSKEYDOWN";
+    case 0x0105: return "SYSKEYUP";
+    case 0x0106: return "SYSCHAR";
+    case 0x0107: return "SYSDEADCHAR";
+    case 0x0108: return "UNICHAR";
+    case 0x0109: return "KEYLAST";
+    case 0x00FF: return "INPUT";
+    case 0x0312: return "HOTKEY";
+    case 0x0290: return "IME_KEYDN";
+    case 0x0291: return "IME_KEYUP";
+    default:     return "?KB";
+    }
+}
+
+/**
+ * Subclassed WndProc — intercepts all keyboard messages.
+ * This runs on the game's main thread (called by DispatchMessage).
+ *
+ * SAFETY: We cache g_orig_wndproc in a local to avoid a race with
+ * remove_wndproc_hook() setting it to NULL from the detach thread.
+ */
+static LRESULT CALLBACK hooked_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    WNDPROC orig = g_orig_wndproc;  /* cache — protect against concurrent unhook */
+    if (!orig) return DefWindowProcA(hwnd, msg, wParam, lParam);
+
+    /* Bot hotkey detection — check on key down before logging */
+    if (msg == 0x0100 /* WM_KEYDOWN */ || msg == 0x0104 /* WM_SYSKEYDOWN */) {
+        BOOL ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        BOOL shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        BOOL alt   = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        if (handle_bot_hotkey((BYTE)wParam, ctrl, shift, alt))
+            return 0;  /* consumed — don't pass to game */
+    }
+
+    if (is_keyboard_msg(msg)) {
+        /* Log to ring buffer */
+        LONG idx = InterlockedIncrement(&g_wndproc_log_idx) - 1;
+        WndProcLogEntry *e = &g_wndproc_log[idx % WNDPROC_LOG_SIZE];
+        e->tick = GetTickCount();
+        e->msg = msg;
+        e->wParam = (DWORD)wParam;
+        e->lParam = (DWORD)lParam;
+
+        /* Increment per-type counter */
+        switch (msg) {
+        case 0x0100: InterlockedIncrement(&g_wnd_keydown); break;
+        case 0x0101: InterlockedIncrement(&g_wnd_keyup); break;
+        case 0x0102: InterlockedIncrement(&g_wnd_char); break;
+        case 0x0104: InterlockedIncrement(&g_wnd_syskeydown); break;
+        case 0x0105: InterlockedIncrement(&g_wnd_syskeyup); break;
+        case 0x00FF: InterlockedIncrement(&g_wnd_input); break;
+        case 0x0312: InterlockedIncrement(&g_wnd_hotkey); break;
+        default:     InterlockedIncrement(&g_wnd_other_kb); break;
+        }
+
+        /* Log details — rate-limit WM_INPUT (could be mouse spam) */
+        if (msg == 0x00FF) {
+            /* WM_INPUT: only log first 20 to avoid mouse-move flood */
+            if (g_wnd_input <= 20) {
+                log_write("WndProc: INPUT(0x00FF) wP=0x%04X lP=0x%08X (#%d)",
+                          (DWORD)wParam, (DWORD)lParam, (int)g_wnd_input);
+            } else if (g_wnd_input == 21) {
+                log_write("WndProc: INPUT — suppressing further logs (count > 20)");
+            }
+        } else {
+            log_write("WndProc: %s(0x%04X) wP=0x%04X lP=0x%08X",
+                      kb_msg_name(msg), msg, (DWORD)wParam, (DWORD)lParam);
+        }
+    }
+
+    return CallWindowProcA(orig, hwnd, msg, wParam, lParam);
+}
+
+/**
+ * Install WndProc subclass on the game window.
+ * MUST be called from the game's main thread (deferred via g_mainthread_cmd).
+ */
+static BOOL install_wndproc_hook(void)
+{
+    HWND hwnd = find_game_window();
+    if (!hwnd) {
+        log_write("install_wndproc_hook: no game window found");
+        return FALSE;
+    }
+    if (g_wndproc_hooked) {
+        log_write("install_wndproc_hook: already hooked");
+        return TRUE;
+    }
+
+    g_orig_wndproc = (WNDPROC)(LONG_PTR)SetWindowLongA(hwnd, GWL_WNDPROC, (LONG)(LONG_PTR)hooked_wndproc);
+    if (!g_orig_wndproc) {
+        log_write("install_wndproc_hook: SetWindowLongA failed err=%u", GetLastError());
+        return FALSE;
+    }
+
+    g_wndproc_hooked = TRUE;
+
+    /* Reset counters */
+    g_wnd_keydown = 0;
+    g_wnd_keyup = 0;
+    g_wnd_char = 0;
+    g_wnd_syskeydown = 0;
+    g_wnd_syskeyup = 0;
+    g_wnd_input = 0;
+    g_wnd_hotkey = 0;
+    g_wnd_other_kb = 0;
+    g_wndproc_log_idx = 0;
+
+    log_write("install_wndproc_hook: OK orig=%p new=%p hwnd=%p",
+              g_orig_wndproc, hooked_wndproc, hwnd);
+    return TRUE;
+}
+
+/**
+ * Remove WndProc subclass — restore original WndProc.
+ * Safe to call from any thread (DllMain detach or main thread command).
+ *
+ * Safety: verify current WndProc is still ours before restoring.
+ * If another hook chained after us, blindly restoring would break the chain.
+ */
+static void remove_wndproc_hook(void)
+{
+    HWND hwnd;
+    WNDPROC current;
+    if (!g_wndproc_hooked || !g_orig_wndproc) return;
+
+    hwnd = find_game_window();
+    if (hwnd) {
+        current = (WNDPROC)(LONG_PTR)GetWindowLongA(hwnd, GWL_WNDPROC);
+        if (current == hooked_wndproc) {
+            SetWindowLongA(hwnd, GWL_WNDPROC, (LONG)(LONG_PTR)g_orig_wndproc);
+            log_write("remove_wndproc_hook: restored orig=%p", g_orig_wndproc);
+        } else {
+            log_write("remove_wndproc_hook: WndProc changed by someone else! current=%p ours=%p — NOT restoring",
+                      current, hooked_wndproc);
+        }
+    }
+
+    /* Mark unhooked — set flag before clearing pointer for hooked_wndproc safety */
+    g_wndproc_hooked = FALSE;
+    g_orig_wndproc = NULL;
+}
+
+/**
+ * Check if ge.exe imports Raw Input API functions from user32.dll.
+ * Scans the Import Address Table by name. Returns count of RI imports found.
+ */
+static int check_raw_input_imports(void)
+{
+    HMODULE hExe = GetModuleHandleA(NULL);
+    BYTE *base = (BYTE *)hExe;
+    IMAGE_DOS_HEADER *dos;
+    IMAGE_NT_HEADERS *nt;
+    IMAGE_IMPORT_DESCRIPTOR *imports;
+    DWORD import_rva;
+    int found = 0;
+
+    dos = (IMAGE_DOS_HEADER *)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+
+    nt = (IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+
+    import_rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (!import_rva) return 0;
+
+    imports = (IMAGE_IMPORT_DESCRIPTOR *)(base + import_rva);
+
+    for (; imports->Name != 0; imports++) {
+        const char *dll_name = (const char *)(base + imports->Name);
+
+        if (_stricmp(dll_name, "user32.dll") != 0)
+            continue;
+
+        log_write("  Scanning user32.dll IAT (OriginalFirstThunk)...");
+
+        /* Walk Original First Thunk (Import Name Table) for named imports */
+        if (imports->OriginalFirstThunk) {
+            IMAGE_THUNK_DATA *oft = (IMAGE_THUNK_DATA *)(base + imports->OriginalFirstThunk);
+            IMAGE_THUNK_DATA *ft  = (IMAGE_THUNK_DATA *)(base + imports->FirstThunk);
+            int idx = 0;
+
+            for (; oft->u1.AddressOfData != 0; oft++, ft++, idx++) {
+                if (oft->u1.Ordinal & IMAGE_ORDINAL_FLAG)
+                    continue;  /* ordinal import, skip */
+
+                {
+                    IMAGE_IMPORT_BY_NAME *hint =
+                        (IMAGE_IMPORT_BY_NAME *)(base + (DWORD)oft->u1.AddressOfData);
+                    const char *name = (const char *)hint->Name;
+
+                    /* Flag Raw Input functions */
+                    if (strstr(name, "RawInput") || strstr(name, "RAWINPUT")) {
+                        log_write("  ** RAW INPUT: %s @ IAT[%d] = %p", name, idx, (void *)ft->u1.Function);
+                        found++;
+                    }
+
+                    /* Also log all keyboard-related imports for reference */
+                    if (strstr(name, "Key") || strstr(name, "key") ||
+                        strstr(name, "Input") || strstr(name, "Message") ||
+                        strstr(name, "Dispatch") || strstr(name, "Translate") ||
+                        strstr(name, "Wnd") || strstr(name, "Window")) {
+                        log_write("  user32: %s @ IAT[%d] = %p", name, idx, (void *)ft->u1.Function);
+                    }
+                }
+            }
+        }
+        break;  /* found user32.dll, done */
+    }
+
+    /* Also check dynamic resolution */
+    {
+        HMODULE hUser32 = GetModuleHandleA("user32.dll");
+        if (hUser32) {
+            void *pRegRID = (void *)GetProcAddress(hUser32, "RegisterRawInputDevices");
+            void *pGetRID = (void *)GetProcAddress(hUser32, "GetRawInputData");
+            log_write("  GetProcAddress: RegisterRawInputDevices=%p GetRawInputData=%p",
+                      pRegRID, pGetRID);
+        }
+    }
+
+    return found;
+}
+
+/* ─── Bot Control System ─────────────────────────────────────── */
+
+typedef struct {
+    DWORD interval_ms;   /* 0 = disabled */
+    DWORD last_tick;
+} BotTimer;
+
+typedef struct {
+    BOOL  enabled;              /* master bot toggle */
+    BOOL  auto_pick;            /* Ctrl+Space picking */
+    DWORD pick_interval_ms;     /* default 500ms */
+    DWORD pick_last_tick;
+    BOOL  auto_attack;          /* Space attack */
+    DWORD attack_interval_ms;   /* default 2000ms */
+    DWORD attack_last_tick;
+    BotTimer skill[3][6];       /* 3 chars × 6 skills: PC1=QWE RTY, PC2=ASD FGH, PC3=ZXC VBN */
+    BotTimer item[12];          /* 12 item slots: F1-F12 */
+} BotState;
+
+static BotState g_bot = {0};
+
+/* Skill key mappings: PC1=QWERTY, PC2=ASDFGH, PC3=ZXCVBN */
+static const BYTE g_skill_keys[3][6] = {
+    { 'Q', 'W', 'E', 'R', 'T', 'Y' },
+    { 'A', 'S', 'D', 'F', 'G', 'H' },
+    { 'Z', 'X', 'C', 'V', 'B', 'N' },
+};
+
+/* Item keys: F1-F12 */
+static const BYTE g_item_keys[12] = {
+    VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6,
+    VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12,
+};
+
+/* Timer cycle presets (ms): OFF, 10s, 20s, 30s, 60s, 120s, 300s, 600s */
+static const DWORD g_timer_presets[] = { 0, 10000, 20000, 30000, 60000, 120000, 300000, 600000 };
+#define NUM_TIMER_PRESETS (sizeof(g_timer_presets) / sizeof(g_timer_presets[0]))
+
+/**
+ * Send a key combo via keybd_event: focus → modifiers down → key tap → modifiers up → restore.
+ * modifiers: bit0=Ctrl, bit1=Shift, bit2=Alt
+ */
+static void send_key_combo(BYTE vk, BYTE modifiers)
+{
+    HWND hwnd = find_game_window();
+    HWND prev_fg = GetForegroundWindow();
+    BOOL need_focus = hwnd && (prev_fg != hwnd);
+    BYTE scan = (BYTE)MapVirtualKey(vk, 0);
+
+    if (need_focus) {
+        SetForegroundWindow(hwnd);
+        Sleep(15);
+    }
+
+    /* Modifiers down */
+    if (modifiers & 0x01) keybd_event(VK_CONTROL, 0, 0, 0);
+    if (modifiers & 0x02) keybd_event(VK_SHIFT, 0, 0, 0);
+    if (modifiers & 0x04) keybd_event(VK_MENU, 0, 0, 0);
+
+    /* Key tap */
+    keybd_event(vk, scan, 0, 0);
+    Sleep(g_key_hold_ms);
+    keybd_event(vk, scan, KEYEVENTF_KEYUP, 0);
+
+    /* Modifiers up (reverse order) */
+    if (modifiers & 0x04) keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+    if (modifiers & 0x02) keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0);
+    if (modifiers & 0x01) keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+
+    /* Restore focus */
+    if (need_focus && prev_fg) {
+        Sleep(10);
+        SetForegroundWindow(prev_fg);
+    }
+}
+
+/**
+ * Bot timer tick — called every 50ms from poll thread.
+ * Fires scheduled key combos when intervals elapse.
+ */
+static void bot_tick(void)
+{
+    DWORD now;
+    int c, s;
+
+    if (!g_bot.enabled) return;
+
+    now = GetTickCount();
+
+    /* Auto pick: Ctrl+Space */
+    if (g_bot.auto_pick && g_bot.pick_interval_ms > 0) {
+        if (now - g_bot.pick_last_tick >= g_bot.pick_interval_ms) {
+            g_bot.pick_last_tick = now;
+            send_key_combo(VK_SPACE, 0x01);  /* Ctrl+Space */
+        }
+    }
+
+    /* Auto attack: Space */
+    if (g_bot.auto_attack && g_bot.attack_interval_ms > 0) {
+        if (now - g_bot.attack_last_tick >= g_bot.attack_interval_ms) {
+            g_bot.attack_last_tick = now;
+            send_key_combo(VK_SPACE, 0);
+        }
+    }
+
+    /* Skills: 3 chars × 6 skills */
+    for (c = 0; c < 3; c++) {
+        for (s = 0; s < 6; s++) {
+            if (g_bot.skill[c][s].interval_ms > 0 &&
+                now - g_bot.skill[c][s].last_tick >= g_bot.skill[c][s].interval_ms) {
+                g_bot.skill[c][s].last_tick = now;
+                send_key_combo(g_skill_keys[c][s], 0);
+            }
+        }
+    }
+
+    /* Items: F1-F12 */
+    for (s = 0; s < 12; s++) {
+        if (g_bot.item[s].interval_ms > 0 &&
+            now - g_bot.item[s].last_tick >= g_bot.item[s].interval_ms) {
+            g_bot.item[s].last_tick = now;
+            send_key_combo(g_item_keys[s], 0);
+        }
+    }
+}
+
+/**
+ * Cycle a timer to the next preset value.
+ * Returns the new interval in ms.
+ */
+static DWORD cycle_timer(DWORD current_ms)
+{
+    DWORD i;
+    for (i = 0; i < NUM_TIMER_PRESETS; i++) {
+        if (g_timer_presets[i] == current_ms) {
+            return g_timer_presets[(i + 1) % NUM_TIMER_PRESETS];
+        }
+    }
+    /* Not a preset value — reset to OFF */
+    return 0;
+}
+
+/**
+ * Format milliseconds as human-readable string (e.g. "30s", "5m", "OFF").
+ */
+static const char *format_timer(DWORD ms, char *buf, int buf_size)
+{
+    if (ms == 0) return "OFF";
+    if (ms < 60000)
+        sprintf(buf, "%us", ms / 1000);
+    else
+        sprintf(buf, "%um", ms / 60000);
+    return buf;
+}
+
+/**
+ * Handle bot hotkeys detected in WndProc.
+ * Returns TRUE if the key was consumed (don't pass to game).
+ *
+ * Hotkeys:
+ *   Alt+Shift+0: Master toggle
+ *   Alt+Shift+1: Auto Pick toggle
+ *   Alt+Shift+2: Auto Attack toggle
+ *   Ctrl+Shift+Q/W/E/R/T/Y: Cycle PC1 skill timers
+ *   Ctrl+Shift+A/S/D/F/G/H: Cycle PC2 skill timers
+ *   Ctrl+Shift+Z/X/C/V/B/N: Cycle PC3 skill timers
+ */
+static BOOL handle_bot_hotkey(BYTE vk, BOOL ctrl, BOOL shift, BOOL alt)
+{
+    char msg[64], tbuf[16];
+
+    /* Alt+Shift+number: bot toggles */
+    if (alt && shift && !ctrl) {
+        switch (vk) {
+        case '0':
+            g_bot.enabled = !g_bot.enabled;
+            sprintf(msg, "[Bot] Master: %s", g_bot.enabled ? "ON" : "OFF");
+            log_write("HOTKEY: %s", msg);
+            if (g_fn_sysmsg) g_fn_sysmsg(msg);
+            return TRUE;
+        case '1':
+            g_bot.auto_pick = !g_bot.auto_pick;
+            if (g_bot.auto_pick && g_bot.pick_interval_ms == 0)
+                g_bot.pick_interval_ms = 500;
+            g_bot.pick_last_tick = GetTickCount();
+            sprintf(msg, "[Bot] Auto Pick: %s (%ums)", g_bot.auto_pick ? "ON" : "OFF", g_bot.pick_interval_ms);
+            log_write("HOTKEY: %s", msg);
+            if (g_fn_sysmsg) g_fn_sysmsg(msg);
+            return TRUE;
+        case '2':
+            g_bot.auto_attack = !g_bot.auto_attack;
+            if (g_bot.auto_attack && g_bot.attack_interval_ms == 0)
+                g_bot.attack_interval_ms = 2000;
+            g_bot.attack_last_tick = GetTickCount();
+            sprintf(msg, "[Bot] Auto Attack: %s (%ums)", g_bot.auto_attack ? "ON" : "OFF", g_bot.attack_interval_ms);
+            log_write("HOTKEY: %s", msg);
+            if (g_fn_sysmsg) g_fn_sysmsg(msg);
+            return TRUE;
+        }
+    }
+
+    /* Ctrl+Shift+key: cycle skill timers */
+    if (ctrl && shift && !alt) {
+        int c, s;
+        for (c = 0; c < 3; c++) {
+            for (s = 0; s < 6; s++) {
+                if (vk == g_skill_keys[c][s]) {
+                    DWORD new_ms = cycle_timer(g_bot.skill[c][s].interval_ms);
+                    g_bot.skill[c][s].interval_ms = new_ms;
+                    g_bot.skill[c][s].last_tick = GetTickCount();
+                    sprintf(msg, "[Bot] PC%d Skill%d(%c): %s",
+                            c + 1, s + 1, g_skill_keys[c][s],
+                            format_timer(new_ms, tbuf, sizeof(tbuf)));
+                    log_write("HOTKEY: %s", msg);
+                    if (g_fn_sysmsg) g_fn_sysmsg(msg);
+                    return TRUE;
+                }
+            }
+        }
+    }
+
+    return FALSE;  /* not consumed */
+}
+
+/* Flag: auto-install WndProc hook on first poll tick */
+static volatile BOOL g_auto_wndproc_pending = TRUE;
 
 /* Flag: pending game-thread command (GET_PROP/SET_PROP must run on main thread) */
 static volatile BYTE g_mainthread_cmd = CMD_NOP;
@@ -504,6 +1356,25 @@ static void try_execute_mainthread_cmd(void)
             log_write("  -> UPDATE_ITEM_TABLE EXCEPTION 0x%08X!", GetExceptionCode());
             mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
         }
+        break;
+    }
+
+    case CMD_HOOK_WNDPROC:
+    {
+        log_write("MAIN_THREAD CMD: HOOK_WNDPROC");
+        if (install_wndproc_hook()) {
+            mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        } else {
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+        }
+        break;
+    }
+
+    case CMD_UNHOOK_WNDPROC:
+    {
+        log_write("MAIN_THREAD CMD: UNHOOK_WNDPROC");
+        remove_wndproc_hook();
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
         break;
     }
 
@@ -1616,11 +2487,16 @@ static void remove_vtable_get_hook(void)
 /**
  * Initialize the command shared memory (separate from Phase 1 ctl shmem).
  */
+static char g_cmd_shmem_name[64];  /* per-PID shmem name */
+
 static void cmd_shmem_init(void)
 {
+    /* Per-PID shared memory: "Local\\ge_phantom_cmd_<PID>" */
+    sprintf(g_cmd_shmem_name, "Local\\ge_phantom_cmd_%u", GetCurrentProcessId());
+
     g_cmd_shmem_handle = CreateFileMappingA(
         INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
-        0, CMD_SHMEM_SIZE, GE_SHMEM_CMD_NAME
+        0, CMD_SHMEM_SIZE, g_cmd_shmem_name
     );
 
     if (g_cmd_shmem_handle) {
@@ -1630,7 +2506,7 @@ static void cmd_shmem_init(void)
         );
         if (g_cmd) {
             memset((void *)g_cmd, 0, CMD_SHMEM_SIZE);
-            log_write("cmd_shmem: mapped at %p", g_cmd);
+            log_write("cmd_shmem: mapped at %p name=\"%s\"", g_cmd, g_cmd_shmem_name);
         }
     } else {
         log_write("cmd_shmem: CreateFileMapping failed (err=%u)", GetLastError());
@@ -1676,14 +2552,18 @@ static void process_command(void)
     case CMD_CHAT:
     case CMD_SYSMSG:
     case CMD_UPDATE_ITEM_TABLE:
+    case CMD_HOOK_WNDPROC:
+    case CMD_UNHOOK_WNDPROC:
         /* These must run on the main game thread (via hooked_send/recv).
          * Signal the main thread and leave the command in shared memory. */
         log_write("CMD: %s → deferred to main thread",
-            cmd == CMD_GET_PROP         ? "GET_PROP" :
-            cmd == CMD_SET_PROP         ? "SET_PROP" :
-            cmd == CMD_CHAT             ? "CHAT"     :
-            cmd == CMD_SYSMSG           ? "SYSMSG"   :
-            cmd == CMD_UPDATE_ITEM_TABLE ? "UPDATE_ITEM_TABLE" : "?");
+            cmd == CMD_GET_PROP          ? "GET_PROP" :
+            cmd == CMD_SET_PROP          ? "SET_PROP" :
+            cmd == CMD_CHAT              ? "CHAT"     :
+            cmd == CMD_SYSMSG            ? "SYSMSG"   :
+            cmd == CMD_UPDATE_ITEM_TABLE ? "UPDATE_ITEM_TABLE" :
+            cmd == CMD_HOOK_WNDPROC      ? "HOOK_WNDPROC" :
+            cmd == CMD_UNHOOK_WNDPROC    ? "UNHOOK_WNDPROC" : "?");
         g_mainthread_cmd = cmd;
         /* Don't clear CMD_OFF_COMMAND — main thread will handle it */
         return;
@@ -2103,6 +2983,101 @@ static void process_command(void)
         break;
     }
 
+    /* ── Phase 6: Keyboard Input Discovery ──────────────── */
+    /* note: CMD_HOOK_WNDPROC / CMD_UNHOOK_WNDPROC are deferred to main thread above */
+
+    case CMD_CHECK_RAW_INPUT:
+    {
+        int found;
+        log_write("CMD: CHECK_RAW_INPUT — scanning ge.exe IAT...");
+        found = check_raw_input_imports();
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = (DWORD)found;
+
+        {
+            char buf[96];
+            sprintf(buf, "raw_input_iat=%d", found);
+            memcpy((void *)(mem + CMD_OFF_STR_RESULT), buf, strlen(buf) + 1);
+        }
+
+        log_write("  -> Raw Input imports found: %d", found);
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+    }
+
+    case CMD_WNDPROC_STATUS:
+    {
+        char buf[96];
+        LONG total = g_wnd_keydown + g_wnd_keyup + g_wnd_char +
+                     g_wnd_syskeydown + g_wnd_syskeyup +
+                     g_wnd_input + g_wnd_hotkey + g_wnd_other_kb;
+
+        /* Format: "hooked=1 KD:5 KU:3 CH:2 SKD:0 SKU:0 IN:0 HK:0 OT:0" */
+        sprintf(buf, "hooked=%d KD:%d KU:%d CH:%d SKD:%d SKU:%d IN:%d HK:%d OT:%d",
+                g_wndproc_hooked ? 1 : 0,
+                (int)g_wnd_keydown, (int)g_wnd_keyup, (int)g_wnd_char,
+                (int)g_wnd_syskeydown, (int)g_wnd_syskeyup,
+                (int)g_wnd_input, (int)g_wnd_hotkey, (int)g_wnd_other_kb);
+
+        memcpy((void *)(mem + CMD_OFF_STR_RESULT), buf, strlen(buf) + 1);
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = (DWORD)total;
+
+        /* Also log last 5 messages from ring buffer */
+        {
+            LONG idx = g_wndproc_log_idx;
+            int i, start = (idx > 5) ? (int)(idx - 5) : 0;
+            for (i = start; i < (int)idx && i < start + 5; i++) {
+                WndProcLogEntry *e = &g_wndproc_log[i % WNDPROC_LOG_SIZE];
+                log_write("  recent[%d]: %s(0x%04X) wP=0x%04X lP=0x%08X t=%u",
+                          i, kb_msg_name(e->msg), e->msg, e->wParam, e->lParam, e->tick);
+            }
+        }
+
+        log_write("CMD: WNDPROC_STATUS -> %s (total=%d)", buf, (int)total);
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+    }
+
+    case CMD_KB_DIAG:
+    {
+        /*
+         * Full keyboard input diagnostic:
+         * 1. Check which DLLs are loaded (dinput8, dinput, user32)
+         * 2. Install API hooks if not already active
+         * 3. Report call counts for GetKeyState / GetAsyncKeyState
+         */
+        HMODULE hDI8   = GetModuleHandleA("dinput8.dll");
+        HMODULE hDI    = GetModuleHandleA("dinput.dll");
+        HMODULE hUser32 = GetModuleHandleA("user32.dll");
+        char buf[96];
+
+        log_write("CMD: KB_DIAG — Full keyboard input diagnostic");
+        log_write("  dinput8.dll  = %p %s", hDI8,  hDI8  ? "LOADED" : "not loaded");
+        log_write("  dinput.dll   = %p %s", hDI,   hDI   ? "LOADED" : "not loaded");
+        log_write("  user32.dll   = %p %s", hUser32, hUser32 ? "LOADED" : "not loaded");
+
+        /* Install hooks if not yet */
+        if (!g_keystate_hooked || !g_asynckeystate_hooked) {
+            install_keystate_hook();
+        }
+
+        log_write("  GetKeyState hook:      %s (total=%d, faked=%d)",
+                  g_keystate_hooked ? "ON" : "OFF",
+                  (int)g_keystate_total_calls, (int)g_keystate_hook_count);
+        log_write("  GetAsyncKeyState hook: %s (total=%d, faked=%d)",
+                  g_asynckeystate_hooked ? "ON" : "OFF",
+                  (int)g_asynckeystate_total_calls, (int)g_asynckeystate_hook_count);
+
+        sprintf(buf, "DI8:%s GKS:%d/%d GAKS:%d/%d",
+                hDI8 ? "YES" : "NO",
+                (int)g_keystate_hook_count, (int)g_keystate_total_calls,
+                (int)g_asynckeystate_hook_count, (int)g_asynckeystate_total_calls);
+
+        memcpy((void *)(mem + CMD_OFF_STR_RESULT), buf, strlen(buf) + 1);
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = (hDI8 ? 1 : 0);
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+    }
+
     /* ── Phase 5: Keyboard Input ─────────────────────────── */
 
     case CMD_SEND_KEY:
@@ -2123,44 +3098,8 @@ static void process_command(void)
         log_write("CMD: SEND_KEY vk=0x%02X scan=0x%02X flags=%u hwnd=%p fg=%p (poll thread)",
                    vk, scan, flags, hwnd, prev_fg);
 
-        if (flags == 3) {
-            /* PostMessageW approach (AIgeHS pattern): no focus needed */
-            if (hwnd) {
-                PostMessageW(hwnd, WM_KEYDOWN, (WPARAM)vk, 0);
-                log_write("  -> PostMessageW WM_KEYDOWN vk=0x%02X lParam=0", vk);
-                Sleep(g_key_hold_ms);
-                PostMessageW(hwnd, WM_KEYUP, (WPARAM)vk, 0);
-                log_write("  -> PostMessageW WM_KEYUP vk=0x%02X lParam=0", vk);
-            } else {
-                log_write("  -> PostMessageW FAILED: no game window");
-                mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
-                break;
-            }
-        } else if (flags == 4) {
-            /* PostMessageW KEYDOWN only (exact AIgeHS pattern) */
-            if (hwnd) {
-                PostMessageW(hwnd, WM_KEYDOWN, (WPARAM)vk, 0);
-                log_write("  -> PostMessageW WM_KEYDOWN-only vk=0x%02X lParam=0", vk);
-            } else {
-                log_write("  -> PostMessageW FAILED: no game window");
-                mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
-                break;
-            }
-        } else if (flags == 5) {
-            /* SendMessageW approach (sync, no focus needed) */
-            if (hwnd) {
-                SendMessageW(hwnd, WM_KEYDOWN, (WPARAM)vk, 0);
-                log_write("  -> SendMessageW WM_KEYDOWN vk=0x%02X lParam=0", vk);
-                Sleep(g_key_hold_ms);
-                SendMessageW(hwnd, WM_KEYUP, (WPARAM)vk, 0);
-                log_write("  -> SendMessageW WM_KEYUP vk=0x%02X lParam=0", vk);
-            } else {
-                log_write("  -> SendMessageW FAILED: no game window");
-                mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
-                break;
-            }
-        } else {
-            /* flags 0/1/2: original keybd_event approach (needs focus) */
+        {
+            /* flags 0/1/2: keybd_event approach (proven working, needs focus) */
             if (need_focus) {
                 SetForegroundWindow(hwnd);
                 Sleep(15);
@@ -2262,6 +3201,139 @@ static void process_command(void)
         break;
     }
 
+    case CMD_KEY_COMBO:
+    {
+        DWORD vk   = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
+        DWORD mods = *(volatile DWORD *)(mem + CMD_OFF_PARAM2);
+
+        if (vk >= 256) {
+            log_write("CMD: KEY_COMBO — invalid vk=0x%X", vk);
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+            break;
+        }
+
+        log_write("CMD: KEY_COMBO vk=0x%02X mods=0x%02X (ctrl=%d shift=%d alt=%d)",
+                   vk, mods, mods & 1, (mods >> 1) & 1, (mods >> 2) & 1);
+        send_key_combo((BYTE)vk, (BYTE)mods);
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+    }
+
+    /* ── Bot Control Commands ──────────────────────────── */
+
+    case CMD_BOT_STATUS:
+    {
+        char buf[96];
+        int active_skills = 0, active_items = 0;
+        int c, s;
+
+        for (c = 0; c < 3; c++)
+            for (s = 0; s < 6; s++)
+                if (g_bot.skill[c][s].interval_ms > 0) active_skills++;
+        for (s = 0; s < 12; s++)
+            if (g_bot.item[s].interval_ms > 0) active_items++;
+
+        sprintf(buf, "en=%d pick=%d/%u atk=%d/%u skills=%d items=%d",
+                g_bot.enabled ? 1 : 0,
+                g_bot.auto_pick ? 1 : 0, g_bot.pick_interval_ms,
+                g_bot.auto_attack ? 1 : 0, g_bot.attack_interval_ms,
+                active_skills, active_items);
+
+        memcpy((void *)(mem + CMD_OFF_STR_RESULT), buf, strlen(buf) + 1);
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = g_bot.enabled ? 1 : 0;
+        log_write("CMD: BOT_STATUS -> %s", buf);
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+    }
+
+    case CMD_BOT_TOGGLE:
+    {
+        DWORD feature = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
+        DWORD value   = *(volatile DWORD *)(mem + CMD_OFF_PARAM2);  /* 0=off, 1=on, 0xFFFFFFFF=toggle */
+
+        switch (feature) {
+        case 0: /* master */
+            g_bot.enabled = (value == 0xFFFFFFFF) ? !g_bot.enabled : (BOOL)value;
+            log_write("CMD: BOT_TOGGLE master=%d", g_bot.enabled);
+            if (g_fn_sysmsg) {
+                char m[32]; sprintf(m, "[Bot] Master: %s", g_bot.enabled ? "ON" : "OFF");
+                g_fn_sysmsg(m);
+            }
+            break;
+        case 1: /* auto_pick */
+            g_bot.auto_pick = (value == 0xFFFFFFFF) ? !g_bot.auto_pick : (BOOL)value;
+            if (g_bot.auto_pick && g_bot.pick_interval_ms == 0) g_bot.pick_interval_ms = 500;
+            g_bot.pick_last_tick = GetTickCount();
+            log_write("CMD: BOT_TOGGLE pick=%d interval=%u", g_bot.auto_pick, g_bot.pick_interval_ms);
+            break;
+        case 2: /* auto_attack */
+            g_bot.auto_attack = (value == 0xFFFFFFFF) ? !g_bot.auto_attack : (BOOL)value;
+            if (g_bot.auto_attack && g_bot.attack_interval_ms == 0) g_bot.attack_interval_ms = 2000;
+            g_bot.attack_last_tick = GetTickCount();
+            log_write("CMD: BOT_TOGGLE attack=%d interval=%u", g_bot.auto_attack, g_bot.attack_interval_ms);
+            break;
+        default:
+            log_write("CMD: BOT_TOGGLE unknown feature=%u", feature);
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+            goto bot_toggle_done;
+        }
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = g_bot.enabled ? 1 : 0;
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+    bot_toggle_done:
+        break;
+    }
+
+    case CMD_BOT_SET_TIMER:
+    {
+        DWORD timer_id    = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
+        DWORD interval_ms = *(volatile DWORD *)(mem + CMD_OFF_PARAM2);
+        DWORD now = GetTickCount();
+
+        /*
+         * Timer ID encoding:
+         *   0 = pick_interval
+         *   1 = attack_interval
+         *   0x10-0x15 = PC1 skills (char 0, skill 0-5)
+         *   0x20-0x25 = PC2 skills (char 1, skill 0-5)
+         *   0x30-0x35 = PC3 skills (char 2, skill 0-5)
+         *   0x40-0x4B = items (slot 0-11)
+         */
+        if (timer_id == 0) {
+            g_bot.pick_interval_ms = interval_ms;
+            g_bot.pick_last_tick = now;
+            log_write("CMD: BOT_SET_TIMER pick=%u", interval_ms);
+        } else if (timer_id == 1) {
+            g_bot.attack_interval_ms = interval_ms;
+            g_bot.attack_last_tick = now;
+            log_write("CMD: BOT_SET_TIMER attack=%u", interval_ms);
+        } else if (timer_id >= 0x10 && timer_id <= 0x35) {
+            int ch = (timer_id >> 4) - 1;    /* 0x10→0, 0x20→1, 0x30→2 */
+            int sk = timer_id & 0x0F;
+            if (ch >= 0 && ch < 3 && sk < 6) {
+                g_bot.skill[ch][sk].interval_ms = interval_ms;
+                g_bot.skill[ch][sk].last_tick = now;
+                log_write("CMD: BOT_SET_TIMER skill[%d][%d]=%u", ch, sk, interval_ms);
+            } else {
+                log_write("CMD: BOT_SET_TIMER invalid skill id=0x%02X", timer_id);
+                mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+                break;
+            }
+        } else if (timer_id >= 0x40 && timer_id <= 0x4B) {
+            int slot = timer_id - 0x40;
+            g_bot.item[slot].interval_ms = interval_ms;
+            g_bot.item[slot].last_tick = now;
+            log_write("CMD: BOT_SET_TIMER item[%d]=%u", slot, interval_ms);
+        } else {
+            log_write("CMD: BOT_SET_TIMER unknown id=0x%02X", timer_id);
+            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
+            break;
+        }
+
+        *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = interval_ms;
+        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
+        break;
+    }
+
     default:
         log_write("CMD: UNKNOWN 0x%02X", cmd);
         mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
@@ -2283,7 +3355,19 @@ static DWORD WINAPI cmd_poll_thread(LPVOID param)
     log_write("cmd_poll_thread: started");
 
     while (g_cmd_thread_running) {
+        /* Auto-install WndProc hook on first tick (deferred from DllMain) */
+        if (g_auto_wndproc_pending) {
+            HWND hwnd = find_game_window();
+            if (hwnd) {
+                g_auto_wndproc_pending = FALSE;
+                /* Defer to main thread */
+                g_mainthread_cmd = CMD_HOOK_WNDPROC;
+                log_write("cmd_poll_thread: auto-installing WndProc hook");
+            }
+        }
+
         process_command();
+        bot_tick();
         Sleep(50);
     }
 
@@ -2393,7 +3477,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         /* Phase 2: Start command poll thread */
         cmd_start();
 
-        log_write("=== Phase 2 initialized ===");
+        /* Initialize bot defaults */
+        g_bot.pick_interval_ms = 500;
+        g_bot.attack_interval_ms = 2000;
+
+        log_write("=== Phase 2 initialized (PID=%u shmem=%s) ===",
+                  GetCurrentProcessId(), g_cmd_shmem_name);
         break;
 
     case DLL_PROCESS_DETACH:
@@ -2402,6 +3491,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
 
         /* Phase 2: Stop command thread */
         cmd_stop();
+
+        /* Phase 6: Remove hooks if active */
+        remove_di_keyboard_hook();
+        remove_wndproc_hook();
+        remove_keystate_hook();
 
         /* Phase 3: Remove vtable hooks if active */
         remove_vtable_get_hook();

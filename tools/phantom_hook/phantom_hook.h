@@ -117,8 +117,20 @@
 #define CMD_UPDATE_ITEM_TABLE   0x42   /* UpdateItemTable() → flush IES cache (main thread) */
 #define CMD_SEND_KEY            0x43   /* SendKey: param1=VK code, param2=flags (0=tap,1=down,2=up) */
 #define CMD_SEND_KEYS           0x44   /* SendKeys: str_param=key sequence, param1=delay_ms between keys */
+#define CMD_KEY_COMBO           0x45   /* KeyCombo: param1=VK, param2=modifier bitmask (bit0=Ctrl,1=Shift,2=Alt) */
 #define CMD_DUMP_MEM            0x50   /* Dump N bytes: param1=addr, param2=count(max 96) → str_result as hex */
 #define CMD_SCAN_XREF_STR      0x51   /* Find string in .rdata, then scan .text for xrefs → str_result */
+#define CMD_HOOK_WNDPROC        0x60   /* Install WndProc subclass to log keyboard msgs (main thread) */
+#define CMD_UNHOOK_WNDPROC      0x61   /* Remove WndProc subclass (main thread) */
+#define CMD_CHECK_RAW_INPUT     0x62   /* Check if game imports Raw Input API → str_result */
+#define CMD_WNDPROC_STATUS      0x63   /* Read WndProc message counters → str_result */
+#define CMD_KB_DIAG             0x64   /* Keyboard input diagnostic → str_result */
+
+/* ─── Bot Control Commands ─────────────────────────────────── */
+#define CMD_BOT_STATUS          0x70   /* Get bot status → str_result */
+#define CMD_BOT_TOGGLE          0x71   /* Toggle: param1=feature(0=master,1=pick,2=attack), param2=0/1(-1=toggle) */
+#define CMD_BOT_SET_TIMER       0x72   /* Timer: param1=timer_id, param2=interval_ms (0=off) */
+
 #define CMD_PING                0xFE   /* Ping → status=done, result_i32=0xDEADBEEF */
 
 /* Status codes (written by DLL to offset 0x01) */
