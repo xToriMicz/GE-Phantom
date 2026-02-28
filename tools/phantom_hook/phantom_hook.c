@@ -131,11 +131,6 @@ static fn_UpdateItemTable g_fn_update_item_table = NULL;
 /* Game window handle — found once, cached for SendKey */
 static HWND g_game_hwnd = NULL;
 
-/* ── Main-thread keyboard: SetKeyboardState + PostMessage ────── */
-/* Pending key release — checked every main-thread tick */
-static volatile BYTE  g_mt_key_vk = 0;        /* VK to release (0=none) */
-static volatile DWORD g_mt_key_release_at = 0; /* GetTickCount target */
-
 /* Find main window of current process */
 static BOOL CALLBACK enum_wnd_proc(HWND hwnd, LPARAM lParam)
 {
@@ -167,171 +162,8 @@ static HWND find_game_window(void)
     return g_game_hwnd;
 }
 
-/* ── Virtual Keyboard (GetAsyncKeyState hook) ────────────────── */
-/* Virtual key states: 0=released, 1=pressed (auto-release via tick) */
-static volatile BYTE g_virtual_keys[256] = {0};
-static DWORD g_virtual_key_tick[256] = {0};   /* GetTickCount when pressed */
-static DWORD g_virtual_key_hold_ms = 60;       /* auto-release after N ms */
-static SHORT (WINAPI *g_real_GetAsyncKeyState)(int vKey) = NULL;
-
-/* ── DirectInput GetDeviceState hook ─────────────────────────── */
-/* Virtual key states indexed by SCAN CODE (DIK_* = hardware scan code) */
-static volatile BYTE g_di_keys[256] = {0};
-static DWORD g_di_key_tick[256] = {0};
-static BOOL g_di_hook_installed = FALSE;
-static DWORD g_di_key_hold_ms = 120;  /* DirectInput hold time — longer than keybd_event */
-
-typedef HRESULT (WINAPI *PFN_GetDeviceState)(void *pThis, DWORD cbData, void *lpvData);
-static PFN_GetDeviceState g_real_DI_GetDeviceState = NULL;
-
-static DWORD g_di_call_count = 0;
-
-static HRESULT WINAPI hooked_DI_GetDeviceState(void *pThis, DWORD cbData, void *lpvData)
-{
-    HRESULT hr = g_real_DI_GetDeviceState(pThis, cbData, lpvData);
-
-    g_di_call_count++;
-    if (g_di_call_count == 1 || g_di_call_count == 100 || g_di_call_count % 10000 == 0)
-        log_write("DI_GetDeviceState: call #%u cbData=%u hr=0x%08X", g_di_call_count, cbData, hr);
-
-    /* Keyboard state = 256 bytes, each byte 0x00 or 0x80 */
-    if (SUCCEEDED(hr) && cbData == 256 && lpvData) {
-        BYTE *keys = (BYTE *)lpvData;
-        DWORD now = GetTickCount();
-        int i;
-        for (i = 0; i < 256; i++) {
-            if (g_di_keys[i]) {
-                DWORD elapsed = now - g_di_key_tick[i];
-                if (elapsed < g_di_key_hold_ms) {
-                    keys[i] = 0x80;  /* inject key press */
-                    if (g_di_keys[i] == 1) {
-                        log_write("DI_GetDeviceState: INJECTED scan=0x%02X", i);
-                        g_di_keys[i] = 2;  /* mark as logged */
-                    }
-                } else {
-                    g_di_keys[i] = 0;  /* auto-release */
-                }
-            }
-        }
-    }
-    return hr;
-}
-
-/* Second hook for W (Unicode) variant — may have separate vtable */
-static PFN_GetDeviceState g_real_DI_GetDeviceStateW = NULL;
-
-static HRESULT WINAPI hooked_DI_GetDeviceStateW(void *pThis, DWORD cbData, void *lpvData)
-{
-    HRESULT hr = g_real_DI_GetDeviceStateW(pThis, cbData, lpvData);
-
-    g_di_call_count++;
-    if (g_di_call_count == 1 || g_di_call_count == 100 || g_di_call_count % 10000 == 0)
-        log_write("DI_GetDeviceStateW: call #%u cbData=%u hr=0x%08X", g_di_call_count, cbData, hr);
-
-    if (SUCCEEDED(hr) && cbData == 256 && lpvData) {
-        BYTE *keys = (BYTE *)lpvData;
-        DWORD now = GetTickCount();
-        int i;
-        for (i = 0; i < 256; i++) {
-            if (g_di_keys[i]) {
-                DWORD elapsed = now - g_di_key_tick[i];
-                if (elapsed < g_di_key_hold_ms) {
-                    keys[i] = 0x80;
-                    if (g_di_keys[i] == 1) {
-                        log_write("DI_GetDeviceStateW: INJECTED scan=0x%02X", i);
-                        g_di_keys[i] = 2;
-                    }
-                } else {
-                    g_di_keys[i] = 0;
-                }
-            }
-        }
-    }
-    return hr;
-}
-
-/* Hook one DirectInput variant's GetDeviceState via vtable patching.
- * Returns TRUE if vtable was patched successfully. */
-static BOOL hook_dinput_variant(const GUID *pIID, const char *label,
-                                PFN_GetDeviceState hookFn, PFN_GetDeviceState *pRealOut)
-{
-    static const GUID my_GUID_SysKeyboard =
-        {0x6F1D2B61, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
-
-    typedef HRESULT (WINAPI *PFN_DI8Create)(HINSTANCE, DWORD, const GUID *, void **, void *);
-    typedef HRESULT (WINAPI *PFN_CreateDevice)(void *, const GUID *, void **, void *);
-    typedef ULONG   (WINAPI *PFN_Release)(void *);
-
-    HMODULE hDI = GetModuleHandleA("dinput8.dll");
-    PFN_DI8Create pCreate;
-    void *pDI = NULL, *pDev = NULL;
-    void **vtDI, **vtDev;
-    HRESULT hr;
-    DWORD oldProt;
-
-    pCreate = (PFN_DI8Create)GetProcAddress(hDI, "DirectInput8Create");
-    if (!pCreate) return FALSE;
-
-    hr = pCreate(GetModuleHandleA(NULL), 0x0800, pIID, &pDI, NULL);
-    if (FAILED(hr) || !pDI) {
-        log_write("dinput_hook(%s): DI8Create failed hr=0x%08X", label, hr);
-        return FALSE;
-    }
-
-    vtDI = *(void ***)pDI;
-    hr = ((PFN_CreateDevice)vtDI[3])(pDI, &my_GUID_SysKeyboard, &pDev, NULL);
-    if (FAILED(hr) || !pDev) {
-        log_write("dinput_hook(%s): CreateDevice failed hr=0x%08X", label, hr);
-        ((PFN_Release)vtDI[2])(pDI);
-        return FALSE;
-    }
-
-    vtDev = *(void ***)pDev;
-    *pRealOut = (PFN_GetDeviceState)vtDev[9];
-
-    log_write("dinput_hook(%s): real GetDeviceState=%p, patching vtable[9]...", label, *pRealOut);
-
-    if (!VirtualProtect(&vtDev[9], sizeof(void *), PAGE_EXECUTE_READWRITE, &oldProt)) {
-        log_write("dinput_hook(%s): VirtualProtect failed err=%u", label, GetLastError());
-        ((PFN_Release)(vtDev[2]))(pDev);
-        ((PFN_Release)vtDI[2])(pDI);
-        return FALSE;
-    }
-    vtDev[9] = (void *)hookFn;
-    VirtualProtect(&vtDev[9], sizeof(void *), oldProt, &oldProt);
-
-    log_write("dinput_hook(%s): vtable patched OK!", label);
-
-    ((PFN_Release)(vtDev[2]))(pDev);
-    ((PFN_Release)vtDI[2])(pDI);
-    return TRUE;
-}
-
-/* Install DirectInput GetDeviceState hook — tries both A and W variants */
-static BOOL install_dinput_hook(void)
-{
-    static const GUID my_IID_IDirectInput8A =
-        {0xBF798030, 0x483A, 0x4DA2, {0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00}};
-    static const GUID my_IID_IDirectInput8W =
-        {0xBF798031, 0x483A, 0x4DA2, {0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00}};
-
-    BOOL okA, okW;
-
-    if (!GetModuleHandleA("dinput8.dll")) {
-        log_write("dinput_hook: dinput8.dll not loaded");
-        return FALSE;
-    }
-
-    okA = hook_dinput_variant(&my_IID_IDirectInput8A, "A",
-                              hooked_DI_GetDeviceState, &g_real_DI_GetDeviceState);
-    okW = hook_dinput_variant(&my_IID_IDirectInput8W, "W",
-                              hooked_DI_GetDeviceStateW, &g_real_DI_GetDeviceStateW);
-
-    log_write("dinput_hook: A=%s W=%s", okA ? "OK" : "FAIL", okW ? "OK" : "FAIL");
-
-    g_di_hook_installed = (okA || okW);
-    return g_di_hook_installed;
-}
+/* ── Keyboard Input ──────────────────────────────────────────── */
+static DWORD g_key_hold_ms = 60;  /* keybd_event hold duration in ms */
 
 /* Flag: pending game-thread command (GET_PROP/SET_PROP must run on main thread) */
 static volatile BYTE g_mainthread_cmd = CMD_NOP;
@@ -524,8 +356,6 @@ static void try_execute_mainthread_cmd(void)
 
     if (!mem) return;
 
-    /* Check pending key release — no longer needed, release is inline */
-
     cmd = g_mainthread_cmd;
     if (cmd == CMD_NOP) return;
 
@@ -677,61 +507,6 @@ static void try_execute_mainthread_cmd(void)
         break;
     }
 
-    case CMD_SEND_KEY:
-    {
-        DWORD vk    = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
-        DWORD flags = *(volatile DWORD *)(mem + CMD_OFF_PARAM2);
-        BYTE scan   = (BYTE)MapVirtualKey(vk, 0);
-        HWND hwnd   = find_game_window();
-        BYTE state[256];
-
-        log_write("MAIN_THREAD CMD: SEND_KEY vk=0x%02X scan=0x%02X flags=%u hwnd=%p",
-                   vk, scan, flags, hwnd);
-
-        if (vk >= 256) {
-            mem[CMD_OFF_STATUS] = CMD_STATUS_ERROR;
-            break;
-        }
-
-        /* keybd_event — proven working method.
-         * For background: briefly SetForegroundWindow, send key, restore. */
-        {
-            HWND prev_fg = GetForegroundWindow();
-            BOOL need_focus = (prev_fg != hwnd) && hwnd;
-
-            if (need_focus) {
-                /* Bring game to front briefly */
-                SetForegroundWindow(hwnd);
-                Sleep(15);
-                log_write("  -> SetForegroundWindow (was %p)", prev_fg);
-            }
-
-            if (flags == 0 || flags == 1) {
-                keybd_event((BYTE)vk, scan, 0, 0);
-                log_write("  -> keybd_event DOWN vk=0x%02X", vk);
-            }
-            if (flags == 0) {
-                Sleep(g_virtual_key_hold_ms);
-                keybd_event((BYTE)vk, scan, KEYEVENTF_KEYUP, 0);
-                log_write("  -> keybd_event UP");
-            }
-            if (flags == 2) {
-                keybd_event((BYTE)vk, scan, KEYEVENTF_KEYUP, 0);
-                log_write("  -> keybd_event UP");
-            }
-
-            if (need_focus && prev_fg) {
-                /* Restore previous foreground window */
-                Sleep(10);
-                SetForegroundWindow(prev_fg);
-                log_write("  -> restored foreground to %p", prev_fg);
-            }
-        }
-
-        mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
-        break;
-    }
-
     default:
         break;
     }
@@ -789,66 +564,6 @@ static int WSAAPI hooked_recv(SOCKET s, char *buf, int len, int flags)
     }
 
     return result;
-}
-
-/* ─── GetAsyncKeyState Hook ───────────────────────────────────── */
-
-static volatile LONG g_gaks_call_count = 0;  /* total GetAsyncKeyState calls */
-static volatile LONG g_gaks_vkey_hit = 0;     /* virtual key interceptions */
-
-/* GetKeyState hook (some games use this instead of GetAsyncKeyState) */
-static SHORT (WINAPI *g_real_GetKeyState)(int nVirtKey) = NULL;
-static volatile LONG g_gks_call_count = 0;
-
-static SHORT WINAPI hooked_GetKeyState(int nVirtKey)
-{
-    LONG count = InterlockedIncrement(&g_gks_call_count);
-
-    if (count == 1 || (count % 10000) == 0) {
-        log_write("GetKeyState: call #%d vKey=0x%02X", count, nVirtKey);
-    }
-
-    if (nVirtKey >= 0 && nVirtKey < 256 && g_virtual_keys[nVirtKey]) {
-        DWORD now = GetTickCount();
-        DWORD elapsed = now - g_virtual_key_tick[nVirtKey];
-
-        if (elapsed < g_virtual_key_hold_ms) {
-            log_write("GetKeyState: VIRTUAL HIT vk=0x%02X (held %dms)", nVirtKey, elapsed);
-            return (SHORT)0xFF80;  /* high bit set = key is down */
-        } else {
-            g_virtual_keys[nVirtKey] = 0;
-        }
-    }
-
-    return g_real_GetKeyState(nVirtKey);
-}
-
-static SHORT WINAPI hooked_GetAsyncKeyState(int vKey)
-{
-    LONG count = InterlockedIncrement(&g_gaks_call_count);
-
-    /* Log first call + every 10000th call for diagnostics */
-    if (count == 1 || (count % 10000) == 0) {
-        log_write("GetAsyncKeyState: call #%d vKey=0x%02X", count, vKey);
-    }
-
-    if (vKey >= 0 && vKey < 256 && g_virtual_keys[vKey]) {
-        DWORD now = GetTickCount();
-        DWORD elapsed = now - g_virtual_key_tick[vKey];
-
-        if (elapsed < g_virtual_key_hold_ms) {
-            /* Key is "held" — return pressed state */
-            InterlockedIncrement(&g_gaks_vkey_hit);
-            log_write("GetAsyncKeyState: VIRTUAL HIT vk=0x%02X (held %dms)", vKey, elapsed);
-            return (SHORT)0x8001;  /* high bit=down, low bit=pressed since last call */
-        } else {
-            /* Hold expired — auto-release */
-            g_virtual_keys[vKey] = 0;
-        }
-    }
-
-    /* Fall through to real function */
-    return g_real_GetAsyncKeyState(vKey);
 }
 
 /* ─── IAT Hook Engine ─────────────────────────────────────────── */
@@ -989,48 +704,6 @@ static BOOL install_hooks(void)
         g_orig_recv = (void *)real_recv;
     }
 
-    /* Hook GetAsyncKeyState + GetKeyState for virtual keyboard input */
-    {
-        HMODULE hUser32 = GetModuleHandleA("user32.dll");
-        if (hUser32) {
-            void *real_gaks = (void *)GetProcAddress(hUser32, "GetAsyncKeyState");
-            void *real_gks  = (void *)GetProcAddress(hUser32, "GetKeyState");
-
-            if (real_gaks) {
-                BOOL ok_gaks = iat_hook(hExe, "USER32.dll", real_gaks, hooked_GetAsyncKeyState, (void **)&g_real_GetAsyncKeyState);
-                if (!ok_gaks) ok_gaks = iat_hook(hExe, "user32.dll", real_gaks, hooked_GetAsyncKeyState, (void **)&g_real_GetAsyncKeyState);
-                if (!ok_gaks) g_real_GetAsyncKeyState = (SHORT (WINAPI *)(int))real_gaks;
-                log_write("install_hooks: IAT GetAsyncKeyState=%s", ok_gaks ? "OK" : "FAIL(direct)");
-            }
-
-            if (real_gks) {
-                BOOL ok_gks = iat_hook(hExe, "USER32.dll", real_gks, hooked_GetKeyState, (void **)&g_real_GetKeyState);
-                if (!ok_gks) ok_gks = iat_hook(hExe, "user32.dll", real_gks, hooked_GetKeyState, (void **)&g_real_GetKeyState);
-                if (!ok_gks) g_real_GetKeyState = (SHORT (WINAPI *)(int))real_gks;
-                log_write("install_hooks: IAT GetKeyState=%s", ok_gks ? "OK" : "FAIL(direct)");
-            }
-        }
-    }
-
-    /* Diagnostic: check what input DLLs are loaded */
-    {
-        const char *input_dlls[] = {"dinput8.dll", "dinput.dll", "xinput1_3.dll", "xinput1_4.dll", "xinput9_1_0.dll", NULL};
-        int i;
-        for (i = 0; input_dlls[i]; i++) {
-            HMODULE h = GetModuleHandleA(input_dlls[i]);
-            if (h) log_write("INPUT MODULE LOADED: %s at %p", input_dlls[i], h);
-        }
-    }
-
-    /* Hook DirectInput GetDeviceState for background keyboard input */
-    if (GetModuleHandleA("dinput8.dll")) {
-        if (install_dinput_hook()) {
-            log_write("install_hooks: DirectInput GetDeviceState hook = OK");
-        } else {
-            log_write("install_hooks: DirectInput GetDeviceState hook = FAIL");
-        }
-    }
-
     return (ok_send || ok_recv);
 }
 
@@ -1050,21 +723,6 @@ static void remove_hooks(void)
         g_orig_recv = NULL;
     }
 
-    if (g_real_GetAsyncKeyState) {
-        iat_hook(hExe, "USER32.dll",
-                 hooked_GetAsyncKeyState, g_real_GetAsyncKeyState, NULL);
-        iat_hook(hExe, "user32.dll",
-                 hooked_GetAsyncKeyState, g_real_GetAsyncKeyState, NULL);
-        g_real_GetAsyncKeyState = NULL;
-    }
-
-    if (g_real_GetKeyState) {
-        iat_hook(hExe, "USER32.dll",
-                 hooked_GetKeyState, g_real_GetKeyState, NULL);
-        iat_hook(hExe, "user32.dll",
-                 hooked_GetKeyState, g_real_GetKeyState, NULL);
-        g_real_GetKeyState = NULL;
-    }
 }
 
 /* ─── Fallback: Inline Hook via Detour ────────────────────────── */
@@ -2476,7 +2134,7 @@ static void process_command(void)
             log_write("  -> keybd_event DOWN");
         }
         if (flags == 0) {
-            Sleep(g_virtual_key_hold_ms);
+            Sleep(g_key_hold_ms);
             keybd_event((BYTE)vk, scan, KEYEVENTF_KEYUP, 0);
             log_write("  -> keybd_event UP");
         }
@@ -2499,6 +2157,9 @@ static void process_command(void)
     {
         char seq[64];
         DWORD delay_ms = *(volatile DWORD *)(mem + CMD_OFF_PARAM1);
+        HWND hwnd = find_game_window();
+        HWND prev_fg = GetForegroundWindow();
+        BOOL need_focus = hwnd && (prev_fg != hwnd);
         int i, sent = 0;
 
         memcpy(seq, (const void *)(mem + CMD_OFF_STR_PARAM), 64);
@@ -2506,10 +2167,17 @@ static void process_command(void)
 
         if (delay_ms == 0) delay_ms = 80;  /* default 80ms between keys */
 
-        log_write("CMD: SEND_KEYS seq=\"%s\" delay=%u (virtual keyboard)", seq, delay_ms);
+        log_write("CMD: SEND_KEYS seq=\"%s\" delay=%u (keybd_event)", seq, delay_ms);
+
+        if (need_focus) {
+            SetForegroundWindow(hwnd);
+            Sleep(15);
+            log_write("  -> SetForegroundWindow to game (was %p)", prev_fg);
+        }
 
         for (i = 0; seq[i] != '\0'; i++) {
             BYTE vk;
+            BYTE scan;
             char ch = seq[i];
 
             /* Convert character to virtual key code */
@@ -2532,27 +2200,24 @@ static void process_command(void)
                 vk = (BYTE)(vks & 0xFF);
             }
 
-            /* Key tap via PostMessage + virtual key state */
-            {
-                BYTE scan = (BYTE)MapVirtualKey(vk, 0);
-                HWND hwnd = find_game_window();
-                LPARAM lp_down = (LPARAM)((scan << 16) | 1);
-                LPARAM lp_up   = (LPARAM)((scan << 16) | 1 | 0xC0000000);
-
-                g_virtual_key_tick[vk] = GetTickCount();
-                g_virtual_keys[vk] = 1;
-                if (hwnd) PostMessageA(hwnd, WM_KEYDOWN, vk, lp_down);
-                Sleep(g_virtual_key_hold_ms);
-                g_virtual_keys[vk] = 0;
-                if (hwnd) PostMessageA(hwnd, WM_KEYUP, vk, lp_up);
-            }
+            /* Key tap via keybd_event — proven working method */
+            scan = (BYTE)MapVirtualKey(vk, 0);
+            keybd_event(vk, scan, 0, 0);
+            Sleep(g_key_hold_ms);
+            keybd_event(vk, scan, KEYEVENTF_KEYUP, 0);
             sent++;
 
             /* Inter-key delay */
             Sleep(delay_ms);
         }
 
-        log_write("  -> sent %d keys (virtual)", sent);
+        if (need_focus && prev_fg) {
+            Sleep(10);
+            SetForegroundWindow(prev_fg);
+            log_write("  -> restored foreground to %p", prev_fg);
+        }
+
+        log_write("  -> sent %d keys (keybd_event)", sent);
         *(volatile DWORD *)(mem + CMD_OFF_RESULT_I32) = sent;
         mem[CMD_OFF_STATUS] = CMD_STATUS_DONE;
         break;
